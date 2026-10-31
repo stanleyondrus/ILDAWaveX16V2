@@ -70,7 +70,7 @@ if(ENABLE_HELIOS_USB)
 endif()
 
 pico_set_program_name(ILDAWaveX16V2-RP2350 "ILDAWaveX16V2-RP2350")
-pico_set_program_version(ILDAWaveX16V2-RP2350 "0.1.0") # Keep in sync with "RP_FW_VERSION" in config.h
+pico_set_program_version(ILDAWaveX16V2-RP2350 "0.2.0") # Keep in sync with "RP_FW_VERSION" in config.h
 
 pico_generate_pio_header(ILDAWaveX16V2-RP2350 ${CMAKE_CURRENT_LIST_DIR}/pio/spi_payload_rx.pio)
 pico_generate_pio_header(ILDAWaveX16V2-RP2350 ${CMAKE_CURRENT_LIST_DIR}/pio/dac80508_tx.pio)

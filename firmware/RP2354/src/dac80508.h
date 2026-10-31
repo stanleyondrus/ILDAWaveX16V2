@@ -18,11 +18,13 @@ void dac_write_sample(const int16_t sample[RP_SAMPLE_CHANNELS]);
 void dac_write_sample_batch(const int16_t samples[][RP_SAMPLE_CHANNELS], uint32_t count);
 
 /*
-   Hard safety/off:
-   forces raw DAC code 0x0000 on every physical DAC output channel.
-   Use this for boot, STOP, CLEAR, and fully stopped state.
+   Parked / stopped state:
+   X/Y at raw 0x8000 (0 V on the ILDA differential pairs = scanner centre),
+   every laser/colour/intensity/aux channel at raw 0x0000 (0 V).
+   Use this for boot, STOP, CLEAR, and the fully stopped state. Raw 0x0000
+   on X/Y would be -10 V differential, a full-scale corner.
 */
-void dac_write_all_zero(void);
+void dac_write_park(void);
 
 /*
    Active-stream underrun safety:

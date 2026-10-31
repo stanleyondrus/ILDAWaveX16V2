@@ -37,6 +37,8 @@
 #include "driver/gpio.h"
 #include "hal/spi_ll.h"
 
+#include "nvs.h"
+
 #include "app_config.h"
 #include "rp_manager.h"
 
@@ -95,9 +97,68 @@ static rp_status_t s_status = {
     .remote_sample_rate     = 30000,
     .remote_mirror_y        = true,
     .remote_buffer_size_samples = V1_RING_SIZE,
+    .rate_limit             = RP_DEFAULT_RATE_LIMIT_HZ,
+    .remote_max_rate        = RP_DEFAULT_RATE_LIMIT_HZ,
+    .remote_color_shift_saved = true,
     .last_error             = ESP_OK,
     .remote_fw_version      = "V1-ESP32S3",
 };
+
+/* V1 output tops out here whatever the limit says. */
+#define V1_MAX_RATE_HZ 100000u
+
+/* Same NVS keys as V2, so a saved scanner limit means the same thing on both. */
+static const char *V1_NVS_NAMESPACE = "rpcfg";
+static const char *V1_NVS_RATE_LIMIT_KEY = "rate_limit";
+
+static uint32_t clamp_rate_limit(uint32_t limit_hz)
+{
+    if (limit_hz < RP_MIN_RATE_LIMIT_HZ) {
+        return RP_MIN_RATE_LIMIT_HZ;
+    }
+
+    if (limit_hz > RP_MAX_RATE_LIMIT_HZ) {
+        return RP_MAX_RATE_LIMIT_HZ;
+    }
+
+    return limit_hz;
+}
+
+static void rate_limit_load(void)
+{
+    nvs_handle_t nvs;
+    uint32_t value = 0;
+
+    s_status.rate_limit = RP_DEFAULT_RATE_LIMIT_HZ;
+
+    if (nvs_open(V1_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        if (nvs_get_u32(nvs, V1_NVS_RATE_LIMIT_KEY, &value) == ESP_OK) {
+            s_status.rate_limit = clamp_rate_limit(value);
+        }
+        nvs_close(nvs);
+    }
+
+    /* On V1 the ESP32-S3 is the DAC engine, so its limit is the engine's. */
+    s_status.remote_max_rate = s_status.rate_limit;
+}
+
+static esp_err_t rate_limit_save(uint32_t limit_hz)
+{
+    nvs_handle_t nvs;
+
+    esp_err_t ret = nvs_open(V1_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = nvs_set_u32(nvs, V1_NVS_RATE_LIMIT_KEY, limit_hz);
+    if (ret == ESP_OK) {
+        ret = nvs_commit(nvs);
+    }
+
+    nvs_close(nvs);
+    return ret;
+}
 
 static inline TickType_t delay_ticks_ms(uint32_t ms)
 {
@@ -419,8 +480,10 @@ static void output_task(void *arg)
 
     while (s_output_running) {
         uint32_t requested_rate = s_status.remote_sample_rate;
+        /* Small changes are IDN jitter, but never stay above the limit. */
         if (requested_rate > 0 &&
-            (requested_rate > active_rate + 500 || active_rate > requested_rate + 500)) {
+            (requested_rate > active_rate + 500 || active_rate > requested_rate + 500 ||
+             active_rate > s_status.rate_limit)) {
             active_rate = requested_rate;
             period_q32 = ((uint64_t)1000000 << 32) / active_rate;
             /* Don't reset next_q32 — let the resync check below absorb any
@@ -567,8 +630,14 @@ esp_err_t rp_manager_start(void)
     s_status.initialized = true;
     s_output_ref = 0;
 
+    rate_limit_load();
+    if (s_status.remote_sample_rate > s_status.rate_limit) {
+        s_status.remote_sample_rate = s_status.rate_limit;
+    }
+
     ESP_LOGI(TAG, "DAC80508 ready CS=%d SCK=%d MOSI=%d shutter=%d",
              DAC_CS_GPIO, DAC_SCLK_GPIO, DAC_MOSI_GPIO, DAC_SHUTTER_GPIO);
+    ESP_LOGI(TAG, "Scanner rate limit %lu pps", (unsigned long)s_status.rate_limit);
 
     return ESP_OK;
 }
@@ -710,15 +779,79 @@ esp_err_t rp_manager_output_discard_unstarted(void)
     return ESP_OK;
 }
 
-esp_err_t rp_manager_set_rate(uint32_t rate_hz)
+esp_err_t rp_manager_set_rate_applied(uint32_t rate_hz, uint32_t *applied)
 {
-    if (rate_hz < 1)      rate_hz = 1;
-    if (rate_hz > 100000) rate_hz = 100000;
+    if (rate_hz < 1) rate_hz = 1;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    s_status.remote_requested_rate = rate_hz;
+
+    if (rate_hz > s_status.rate_limit) {
+        ESP_LOGW(TAG, "Rate %lu above scanner limit %lu; clamped",
+                 (unsigned long)rate_hz, (unsigned long)s_status.rate_limit);
+        rate_hz = s_status.rate_limit;
+    }
+
+    if (rate_hz > V1_MAX_RATE_HZ) rate_hz = V1_MAX_RATE_HZ;
+
     s_status.remote_sample_rate = rate_hz;
     xSemaphoreGive(s_mutex);
+
+    if (applied) {
+        *applied = rate_hz;
+    }
+
     return ESP_OK;
+}
+
+esp_err_t rp_manager_set_rate(uint32_t rate_hz)
+{
+    return rp_manager_set_rate_applied(rate_hz, NULL);
+}
+
+uint32_t rp_manager_get_rate_limit(void)
+{
+    return s_status.rate_limit;
+}
+
+uint32_t rp_manager_get_sample_rate(void)
+{
+    return s_status.remote_sample_rate;
+}
+
+esp_err_t rp_manager_set_rate_limit(uint32_t limit_hz)
+{
+    limit_hz = clamp_rate_limit(limit_hz);
+
+    esp_err_t ret = rate_limit_save(limit_hz);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Rate limit not saved: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    s_status.rate_limit = limit_hz;
+    s_status.remote_max_rate = limit_hz;
+    ESP_LOGI(TAG, "Scanner rate limit set to %lu pps", (unsigned long)limit_hz);
+
+    /* Re-apply the producer's rate under the new limit, raised or lowered. */
+    if (s_status.remote_requested_rate > 0) {
+        rp_manager_set_rate(s_status.remote_requested_rate);
+    }
+
+    return ESP_OK;
+}
+
+/* V1 has no colour delay line; the web page shows the error. */
+esp_err_t rp_manager_set_color_shift(int32_t shift_us)
+{
+    (void)shift_us;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t rp_manager_save_color_shift(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 esp_err_t rp_manager_set_buffer_config(uint32_t size_samples,
@@ -764,6 +897,11 @@ esp_err_t rp_manager_start_test_stream(void)
 
 esp_err_t rp_manager_start_test_shape(rp_test_shape_t shape)
 {
+    /* No colour delay line on V1, so nothing for this pattern to calibrate. */
+    if (shape == RP_TEST_SHAPE_COLOR_SHIFT) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     s_test_shape = shape;
     s_test_phase = 0;
     s_test_stream_requested = true;

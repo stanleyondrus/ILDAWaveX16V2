@@ -187,7 +187,6 @@ static uint8_t s_mac[6];
 static volatile uint8_t  s_le_state    = LE_READY;
 static volatile uint8_t  s_pb_state    = PB_IDLE;
 static volatile uint16_t s_pb_flags    = 0;
-static volatile uint32_t s_point_rate  = ED_DEFAULT_POINT_RATE;
 static volatile uint32_t s_point_count = 0;
 static volatile uint32_t s_rp_queued   = 0;   /* estimated samples queued on the RP */
 
@@ -200,6 +199,8 @@ static portMUX_TYPE      s_rp_poll_mux = portMUX_INITIALIZER_UNLOCKED;
 static int64_t           s_rp_poll_us;
 static uint32_t          s_rp_poll_fill;
 static uint32_t          s_rp_poll_sent;
+static uint32_t          s_rp_poll_underruns;         /* last RP underrun count seen */
+static bool              s_rp_poll_underruns_valid;
 static volatile uint32_t s_rp_sent;
 static volatile bool     s_rp_output_started = false;
 static TaskHandle_t      s_rp_poll_task_h = NULL;
@@ -296,7 +297,7 @@ static ed_dac_status_t make_status(void)
     uint32_t fill        = ring_size() + s_rp_queued;
     if (fill > ED_BUFFER_CAPACITY) fill = ED_BUFFER_CAPACITY;
     s.buffer_fullness    = (uint16_t)fill;
-    s.point_rate         = (s_pb_state == PB_IDLE) ? 0 : s_point_rate;
+    s.point_rate         = (s_pb_state == PB_IDLE) ? 0 : rp_manager_get_sample_rate();
     s.point_count        = s_point_count;
     return s;
 }
@@ -352,7 +353,8 @@ static uint32_t rp_queued_estimate(void)
     uint32_t sent  = s_rp_poll_sent;
     portEXIT_CRITICAL(&s_rp_poll_mux);
 
-    int64_t played = (int64_t)s_point_rate * (esp_timer_get_time() - at_us) / 1000000;
+    /* The RP's rate, not the client's: a scanner limit change moves it mid-stream. */
+    int64_t played = (int64_t)rp_manager_get_sample_rate() * (esp_timer_get_time() - at_us) / 1000000;
     int64_t queued = (int64_t)fill + (uint32_t)(s_rp_sent - sent) - played;
     return queued > 0 ? (uint32_t)queued : 0u;
 }
@@ -373,6 +375,19 @@ static void rp_poll_task(void *arg)
                 rp_status_t rp = {0};
                 rp_manager_get_status(&rp);
                 rp_snapshot_set(at_us, rp.remote_buffer_fill_samples, s_rp_sent);
+
+                /*
+                   The RP blanked samples because its ring ran dry: report
+                   it in playback_flags as the real DAC does (bit 1), so a
+                   client can see that it fell behind. Cleared by Prepare.
+                */
+                if (s_rp_poll_underruns_valid &&
+                    rp.remote_underruns != s_rp_poll_underruns &&
+                    s_pb_state == PB_PLAYING) {
+                    s_pb_flags |= (1u << 1);
+                }
+                s_rp_poll_underruns = rp.remote_underruns;
+                s_rp_poll_underruns_valid = true;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(ED_RP_POLL_MS));
@@ -393,6 +408,7 @@ static void feed_output_start(uint32_t queued)
     rp_manager_output_start();
     s_rp_sent = 0;
     rp_snapshot_set(esp_timer_get_time(), queued, 0);
+    s_rp_poll_underruns_valid = false;
     s_rp_output_started = true;
     ESP_LOGI(TAG, "RP output started");
 }
@@ -575,7 +591,7 @@ static void diag_maybe_log(int64_t now_us)
         rp_manager_get_status(&rp);
         ESP_LOGI(TAG, "diag %lu pps: d=%lu pts=%lu (%lu/s) avg=%lu ping=%lu full=%lu "
                  "fullness %lu..%lu avg %lu, wait %lldms max %lldms, payload %lldms, rp_fill=%lu est=%lu",
-                 (unsigned long)s_point_rate,
+                 (unsigned long)rp_manager_get_sample_rate(),
                  (unsigned long)s_diag.data_cmds, (unsigned long)s_diag.points,
                  (unsigned long)(s_diag.points * 1000000ull / (uint64_t)span),
                  (unsigned long)(s_diag.points / s_diag.data_cmds),
@@ -702,11 +718,11 @@ static void handle_client(int sock)
                 uint32_t rate = begin.point_rate;
                 if (rate == 0) rate = ED_DEFAULT_POINT_RATE;
                 if (rate > ED_MAX_POINT_RATE) rate = ED_MAX_POINT_RATE;
-                s_point_rate   = rate;
+                uint32_t applied = rate;
+                rp_manager_set_rate_applied(rate, &applied);   /* status reports the rate really running */
                 s_pb_state     = PB_PLAYING;
                 s_output_armed = true;
-                rp_manager_set_rate(rate);
-                ESP_LOGI(TAG, "Begin @ %lu pps", (unsigned long)rate);
+                ESP_LOGI(TAG, "Begin @ %lu pps (running %lu)", (unsigned long)rate, (unsigned long)applied);
                 if (!send_response(sock, RESP_ACK, cmd)) break;
                 continue;
             }
@@ -725,9 +741,9 @@ static void handle_client(int sock)
                 uint32_t rate = update.point_rate;
                 if (rate == 0) rate = ED_DEFAULT_POINT_RATE;
                 if (rate > ED_MAX_POINT_RATE) rate = ED_MAX_POINT_RATE;
-                s_point_rate = rate;
-                rp_manager_set_rate(rate);
-                ESP_LOGI(TAG, "Update @ %lu pps", (unsigned long)rate);
+                uint32_t applied = rate;
+                rp_manager_set_rate_applied(rate, &applied);
+                ESP_LOGI(TAG, "Update @ %lu pps (running %lu)", (unsigned long)rate, (unsigned long)applied);
                 if (!send_response(sock, RESP_ACK, cmd)) break;
                 continue;
             }
@@ -802,15 +818,17 @@ static void handle_client(int sock)
                             rq_head  = (rq_head + 1) % RATE_QUEUE_CAP;
                             rq_count--;
                             if (new_rate > 0 && new_rate <= ED_MAX_POINT_RATE) {
-                                s_point_rate = new_rate;
-                                rp_manager_set_rate(new_rate);
-                                ESP_LOGI(TAG, "Rate -> %lu pps", (unsigned long)new_rate);
+                                uint32_t applied = new_rate;
+                                rp_manager_set_rate_applied(new_rate, &applied);
+                                ESP_LOGI(TAG, "Rate -> %lu pps (running %lu)", (unsigned long)new_rate, (unsigned long)applied);
                             }
                         }
                     }
                     uint32_t w = ring_write(pt_chunk, chunk);
-                    if (w < chunk)
+                    if (w < chunk) {
                         ESP_LOGW(TAG, "Ring full mid-write (%u/%u)", w, chunk);
+                        protocol_stream_stats_add_dropped(PROTOCOL_STREAM_ETHERDREAM, chunk - w);
+                    }
                     remaining -= chunk;
                 }
 
@@ -873,7 +891,6 @@ disconnect:
     s_le_state     = LE_READY;
     s_pb_flags     = 0;
     s_point_count  = 0;
-    s_point_rate   = ED_DEFAULT_POINT_RATE;
 
     ESP_LOGI(TAG, "State reset - Idle/Ready for next client");
 
@@ -1005,6 +1022,14 @@ static void listener_task(void *arg)
 }
 
 /* -- UDP broadcast task ----------------------------------------------------- */
+
+/* Tell clients the scanner limit, so a well-behaved one never asks for more. */
+static uint32_t advertised_max_rate(void)
+{
+    uint32_t limit = rp_manager_get_rate_limit();
+    return limit < ED_MAX_POINT_RATE ? limit : ED_MAX_POINT_RATE;
+}
+
 static void broadcast_task(void *arg)
 {
     (void)arg;
@@ -1050,7 +1075,7 @@ static void broadcast_task(void *arg)
         pkt.hw_revision    = 0x0002;
         pkt.sw_revision    = 0x0002;
         pkt.buffer_capacity = (uint16_t)ED_BUFFER_CAPACITY;
-        pkt.max_point_rate  = ED_MAX_POINT_RATE;
+        pkt.max_point_rate  = advertised_max_rate();
         pkt.status          = make_status();
 
         int64_t now = esp_timer_get_time();
@@ -1070,7 +1095,7 @@ static void broadcast_task(void *arg)
             reply.hw_revision    = 0x0002;
             reply.sw_revision    = 0x0002;
             reply.buffer_capacity = (uint16_t)ED_BUFFER_CAPACITY;
-            reply.max_point_rate  = ED_MAX_POINT_RATE;
+            reply.max_point_rate  = advertised_max_rate();
             reply.status          = make_status();
             sendto(sock, &reply, sizeof(reply), 0,
                    (struct sockaddr *)&from, sizeof(from));

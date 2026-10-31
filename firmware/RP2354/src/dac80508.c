@@ -128,16 +128,16 @@ static uint32_t dac_build_words_for_sample(uint32_t *buf, const int16_t sample[R
     return i;
 }
 
-static uint32_t dac_build_words_for_all_raw_zero(uint32_t *buf)
+static uint32_t dac_build_words_for_park(uint32_t *buf)
 {
     uint32_t i = 0;
 
     /*
-       Hard stopped/off state:
-       all physical DAC channels raw 0x0000.
+       Parked state: scanners at centre, all laser channels at 0 V.
+       The X/Y level shifters map code 0x8000 to 0 V differential.
     */
-    dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_X,  0x0000);
-    dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_Y,  0x0000);
+    dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_X,  0x8000);
+    dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_Y,  0x8000);
     dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_R,  0x0000);
     dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_G,  0x0000);
     dac_put_word(buf, &i, DAC_REG_DAC_BASE + DAC_CH_B,  0x0000);
@@ -309,11 +309,11 @@ uint32_t dac_get_dma_words_submitted(void)
     return s_dma_words_submitted;
 }
 
-void dac_write_all_zero(void)
+void dac_write_park(void)
 {
     critical_section_enter_blocking(&s_dac_cs);
     uint32_t *words = dac_claim_words_locked();
-    uint32_t count = dac_build_words_for_all_raw_zero(words);
+    uint32_t count = dac_build_words_for_park(words);
     dac_dma_start_locked(words, count);
     dma_channel_wait_for_finish_blocking(s_dac_dma_chan);
     critical_section_exit(&s_dac_cs);
@@ -408,15 +408,17 @@ void dac_init(void)
 
     sleep_ms(10);
 
+    /*
+       Soft reset puts the outputs at the chip's power-on code (zero scale on
+       the DAC80508Z, a full-scale corner on X/Y). Park as soon as the
+       datasheet's 250 us reset time has passed: gain first, so the centre
+       code lands at 0 V, then the codes, then synchronous update.
+    */
     dac_write_24(DAC_REG_TRIGGER, 0x000A);
-    sleep_ms(10);
+    sleep_ms(1);
 
     dac_write_24(DAC_REG_GAIN, 0x00FF);
     dac_write_24(DAC_REG_SYNC, 0xFFFF);
 
-    /*
-       Boot safety:
-       all physical DAC outputs raw 0x0000.
-    */
-    dac_write_all_zero();
+    dac_write_park();
 }

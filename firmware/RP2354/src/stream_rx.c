@@ -24,7 +24,6 @@
 #define STREAM_MAGIC0 0xA5
 #define STREAM_MAGIC1 0x53
 
-#define STREAM_SAMPLES_PER_PACKET 256
 #define STREAM_HEADER_BYTES 12
 #define STREAM_PAYLOAD_BYTES (STREAM_SAMPLES_PER_PACKET * RP_SAMPLE_CHANNELS * 2)
 #define STREAM_PACKET_BYTES (STREAM_HEADER_BYTES + STREAM_PAYLOAD_BYTES)
@@ -38,6 +37,21 @@ static volatile uint32_t s_stream_bad_packets = 0;
 static volatile uint32_t s_stream_dropped_packets = 0;
 static volatile uint32_t s_stream_rx_timeouts = 0;
 static volatile bool s_flow_paused = false;
+static volatile uint32_t s_stale_packets = 0;
+static uint32_t s_packet_epoch = 0;
+static bool s_rx_armed = false;
+
+/*
+   Diagnostics for packets lost between the ESP32 and the ring: gaps in the
+   ESP32's sequence numbers within one stream (epoch), and receives that
+   were cancelled after part of a packet had arrived.
+*/
+static volatile uint32_t s_seq_gaps = 0;
+static volatile uint32_t s_seq_missing = 0;
+static volatile uint32_t s_rx_partial = 0;
+static bool s_seq_valid = false;
+static uint16_t s_seq_expected = 0;
+static uint32_t s_seq_epoch = 0;
 
 static uint32_t s_packet_words[STREAM_PACKET_BYTES];
 static uint8_t s_packet_bytes[STREAM_PACKET_BYTES];
@@ -110,25 +124,13 @@ void stream_rx_init(void)
     s_payload_dma_chan = dma_claim_unused_channel(true);
 }
 
-bool stream_rx_receive_packet(uint32_t timeout_ms)
+static bool rx_nothing_arrived(void)
 {
-    uint32_t fill = ring_get_fill();
+    return dma_hw->ch[s_payload_dma_chan].transfer_count == STREAM_PACKET_BYTES;
+}
 
-    if (s_flow_paused) {
-        if (fill <= ring_get_low_water()) {
-            s_flow_paused = false;
-        } else {
-            gpio_put(RP_READY_GPIO, 0);
-            return false;
-        }
-    }
-
-    if (fill >= ring_get_high_water()) {
-        s_flow_paused = true;
-        gpio_put(RP_READY_GPIO, 0);
-        return false;
-    }
-
+static void rx_arm(void)
+{
     gpio_put(RP_READY_GPIO, 0);
 
     pio_sm_set_enabled(s_payload_pio, s_payload_sm, false);
@@ -155,16 +157,73 @@ bool stream_rx_receive_packet(uint32_t timeout_ms)
     dma_channel_start(s_payload_dma_chan);
     pio_sm_set_enabled(s_payload_pio, s_payload_sm, true);
 
+    /* Remember which stream this packet belongs to (see stream_rx_process_packet). */
+    s_packet_epoch = ring_get_epoch();
+    s_rx_armed = true;
+
     sleep_us(5);
     gpio_put(RP_READY_GPIO, 1);
+}
+
+void stream_rx_cancel(void)
+{
+    if (!s_rx_armed) {
+        return;
+    }
+
+    gpio_put(RP_READY_GPIO, 0);
+    if (!rx_nothing_arrived()) {
+        s_rx_partial++;
+    }
+    dma_channel_abort(s_payload_dma_chan);
+    pio_sm_set_enabled(s_payload_pio, s_payload_sm, false);
+    s_rx_armed = false;
+}
+
+/*
+   Once READY is raised it stays raised, with the DMA armed, until a whole
+   packet is in: a timeout only returns to the main loop. Dropping READY on
+   a timeout lost any packet the ESP32 had started sending in the last
+   millisecond of the wait (4108 bytes at 32 MHz), and the stream jumped a
+   full packet ahead, lit. The ring only drains while a receive is armed, so
+   the room checked at arming time is still there when the packet lands.
+*/
+bool stream_rx_receive_packet(uint32_t timeout_ms)
+{
+    if (!s_rx_armed) {
+        uint32_t fill = ring_get_fill();
+
+        if (s_flow_paused) {
+            if (fill <= ring_get_low_water()) {
+                s_flow_paused = false;
+            } else {
+                gpio_put(RP_READY_GPIO, 0);
+                return false;
+            }
+        }
+
+        if (fill >= ring_get_high_water()) {
+            s_flow_paused = true;
+            gpio_put(RP_READY_GPIO, 0);
+            return false;
+        }
+
+        rx_arm();
+    }
 
     absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
 
     while (dma_channel_is_busy(s_payload_dma_chan)) {
+        /*
+           A STOP or CLEAR handled while nothing has arrived yet makes the
+           coming packet part of the new stream; one that lands mid-packet
+           leaves it stale.
+        */
+        if (rx_nothing_arrived()) {
+            s_packet_epoch = ring_get_epoch();
+        }
+
         if (absolute_time_diff_us(get_absolute_time(), deadline) <= 0) {
-            gpio_put(RP_READY_GPIO, 0);
-            dma_channel_abort(s_payload_dma_chan);
-            pio_sm_set_enabled(s_payload_pio, s_payload_sm, false);
             s_stream_rx_timeouts++;
             return false;
         }
@@ -174,6 +233,7 @@ bool stream_rx_receive_packet(uint32_t timeout_ms)
 
     gpio_put(RP_READY_GPIO, 0);
     pio_sm_set_enabled(s_payload_pio, s_payload_sm, false);
+    s_rx_armed = false;
 
     for (uint32_t i = 0; i < STREAM_PACKET_BYTES; i++) {
         s_packet_bytes[i] = reverse8((uint8_t)((s_packet_words[i] >> 24) & 0xFF));
@@ -207,6 +267,29 @@ void stream_rx_process_packet(void)
         return;
     }
 
+    /*
+       UART commands are handled while a packet is still arriving. A STOP or
+       CLEAR that landed mid-transfer already emptied the ring for the
+       stream this packet belongs to; queuing it now would make the next
+       START play a stale packet, and jump to it from the parked centre.
+    */
+    if (ring_get_epoch() != s_packet_epoch) {
+        s_stale_packets++;
+        s_stream_packets++;
+        return;
+    }
+
+    uint16_t seq = get_u16_le(&s_packet_bytes[2]);
+
+    if (!s_seq_valid || s_seq_epoch != s_packet_epoch) {
+        s_seq_valid = true;
+        s_seq_epoch = s_packet_epoch;
+    } else if (seq != s_seq_expected) {
+        s_seq_gaps++;
+        s_seq_missing += (uint16_t)(seq - s_seq_expected);
+    }
+    s_seq_expected = (uint16_t)(seq + 1u);
+
     const int16_t *samples = (const int16_t *)payload;
 
     uint32_t pushed = ring_push_block(samples, STREAM_SAMPLES_PER_PACKET);
@@ -233,4 +316,8 @@ void stream_rx_get_status(stream_rx_status_t *status)
     status->stream_bad_packets = s_stream_bad_packets;
     status->stream_dropped_packets = s_stream_dropped_packets;
     status->stream_rx_timeouts = s_stream_rx_timeouts;
+    status->stream_stale_packets = s_stale_packets;
+    status->seq_gaps = s_seq_gaps;
+    status->seq_missing = s_seq_missing;
+    status->rx_partial = s_rx_partial;
 }

@@ -12,6 +12,8 @@
 
 static const char *TAG = "rp_uart";
 
+#define RP_UART_LINE_GAP_MS 100
+
 esp_err_t rp_uart_start(void)
 {
     uart_config_t cfg = {
@@ -64,21 +66,51 @@ esp_err_t rp_uart_command(const char *cmd, char *response, int response_len, int
     uart_write_bytes(RP_UART_PORT_NUM, "\n", 1);
     uart_wait_tx_done(RP_UART_PORT_NUM, pdMS_TO_TICKS(50));
 
-    int64_t deadline = esp_timer_get_time() + ((int64_t)timeout_ms * 1000);
+    /*
+       timeout_ms bounds the wait for the reply to start. Once bytes arrive
+       the reply may still take up to RP_UART_LINE_GAP_MS between bytes: a
+       busy ESP32 can leave this task unscheduled for tens of milliseconds
+       while the RP's line sits in the driver buffer, and a long STATUS line
+       must not be cut short by that.
+    */
+    int64_t now = esp_timer_get_time();
+    int64_t deadline = now + ((int64_t)timeout_ms * 1000);
     int pos = 0;
 
-    while (esp_timer_get_time() < deadline && pos < response_len - 1) {
-        uint8_t ch = 0;
-        int n = uart_read_bytes(RP_UART_PORT_NUM, &ch, 1, pdMS_TO_TICKS(10));
+    while (now < deadline && pos < response_len - 1) {
+        uint8_t buf[64];
+        size_t avail = 0;
+        int n;
 
-        if (n == 1) {
+        uart_get_buffered_data_len(RP_UART_PORT_NUM, &avail);
+        if (avail > sizeof(buf)) {
+            avail = sizeof(buf);
+        }
+
+        if (avail > 0) {
+            n = uart_read_bytes(RP_UART_PORT_NUM, buf, avail, 0);
+        } else {
+            n = uart_read_bytes(RP_UART_PORT_NUM, buf, 1, pdMS_TO_TICKS(10));
+        }
+
+        for (int i = 0; i < n; i++) {
+            uint8_t ch = buf[i];
+
             if (ch == '\n') {
                 response[pos] = '\0';
                 return ESP_OK;
             }
 
-            if (ch != '\r') {
+            if (ch != '\r' && pos < response_len - 1) {
                 response[pos++] = (char)ch;
+            }
+        }
+
+        now = esp_timer_get_time();
+        if (n > 0) {
+            int64_t gap_deadline = now + (int64_t)RP_UART_LINE_GAP_MS * 1000;
+            if (gap_deadline > deadline) {
+                deadline = gap_deadline;
             }
         }
     }

@@ -34,6 +34,34 @@ void protocol_stream_stats_add_samples(protocol_stream_source_t source, uint32_t
     portEXIT_CRITICAL(&s_stats_mux);
 }
 
+void protocol_stream_stats_add_dropped(protocol_stream_source_t source, uint32_t samples)
+{
+    if (samples == 0) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_stats_mux);
+
+    switch (source) {
+    case PROTOCOL_STREAM_SD_ILDA:
+        s_stats.sd_ilda_dropped += samples;
+        break;
+    case PROTOCOL_STREAM_IDN:
+        s_stats.idn_dropped += samples;
+        break;
+    case PROTOCOL_STREAM_ETHERDREAM:
+        s_stats.etherdream_dropped += samples;
+        break;
+    case PROTOCOL_STREAM_ILW:
+        s_stats.ilw_dropped += samples;
+        break;
+    default:
+        break;
+    }
+
+    portEXIT_CRITICAL(&s_stats_mux);
+}
+
 void protocol_stream_stats_get(protocol_stream_stats_t *stats)
 {
     if (!stats) {

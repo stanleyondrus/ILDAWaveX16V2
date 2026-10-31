@@ -10,7 +10,7 @@
 #define PRODUCT_NAME "ILDAWaveX16 V2"
 #endif
 
-#define FW_VERSION "0.1.1"
+#define FW_VERSION "0.2.0"
 
 /* Wi-Fi AP */
 #if BOARD_VERSION == 1
