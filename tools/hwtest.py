@@ -14,6 +14,12 @@ backstop or the laser off.
 Every test refuses to start while anything is already outputting. Results are
 printed as tables and appended as JSON lines to logs/hwtest-YYYYMMDD.jsonl.
 
+IDN tests stream through idn_sender.IDNStream (routed, configured, paced to
+its timestamps, closed on its own socket). idn-overrun is a NEGATIVE test: it
+deliberately sends ahead of its timestamps to measure behaviour without flow
+control. idn-timeout checks the 1 s IDN-Hello link timeout with 0.5 s of
+observation slack, measuring output stop and link release separately.
+
 ILW is left out on purpose: an ILW CONFIG rewrites the RP's buffer watermarks
 in flash whenever they differ from the ILW constants.
 """
@@ -23,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import struct
 import sys
 import threading
@@ -32,7 +39,10 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from etherdream_sender import EtherDreamSender, POINT_STRUCT, recv_exact  # noqa: E402
-from idn_sender import IDNSender  # noqa: E402
+from idn_sender import (  # noqa: E402
+    CHUNK_WAVE, IDNCMD_RT_CHANNEL, IDNSender, IDNStream, StreamConfig, boundary_us, build_channel_message,
+    build_close_packet, build_hello_header, build_wave_chunk, encode_sample,
+)
 from ilw_sender import LaserPoint, make_circle, wait_until_precise  # noqa: E402
 
 API_TIMEOUT_S = 4.0
@@ -245,46 +255,75 @@ def ed_feed(s: EtherDreamSender, points, rate: int, seconds: float,
 
 
 # -- IDN helpers -------------------------------------------------------------
+# Normal tests use IDNStream: routing and the sample dictionary on the first
+# packet, configuration repeated every 200 ms, packets sent no earlier than
+# their timestamps, and close on the stream's own socket. Only
+# idn_flood_negative() breaks those rules, on purpose.
 
-def idn_close(s: IDNSender) -> None:
-    """Close the session. UDP: during a flood one close can be lost, so send three."""
-    for _ in range(3):
-        s.stop()
-        time.sleep(0.02)
+IDN_LINK_TIMEOUT_S = 1.0        # IDN-Hello 7.2 default link timeout
+# Observation slack on top of the protocol second: one refreshed status read
+# (HTTP POST + GET, up to ~0.2 s), the firmware's 100 ms receive/timeout poll,
+# and the RP queue (~0.1 s at 30 kpps) draining after the session stops.
+IDN_TIMEOUT_TOLERANCE_S = 0.5
 
 
-def idn_send_burst(s: IDNSender, points, count: int, rate: int, pkt: int = 64) -> int:
+def idn_close(st: IDNStream):
+    """Graceful close with an ACK request on the stream's socket.
+
+    Returns the ACK result code (0x00 closed now, 0xEB already gone) or None
+    when no ACK came back after three tries.
+    """
+    ack = st.close(ack=True)
+    return None if ack is None else ack["result_code"]
+
+
+def idn_send_burst(s: IDNSender, points, count: int, rate: int, pkt: int = 64) -> IDNStream:
+    """Stream exactly `count` points, paced at `rate`, and leave the stream open."""
+    st = s.open_stream(rate, pkt, lead_in=False)
+    st.stream_points([points[i % len(points)] for i in range(count)], loop=False)
+    return st
+
+
+def idn_feed(s: IDNSender, points, rate: int, seconds: float, pkt: int = 64):
+    """Stream `seconds` of points at `rate`. Returns (open stream, client stats)."""
+    st = s.open_stream(rate, pkt, lead_in=False)
+    t0 = time.perf_counter()
+    stats = st.stream_points(points, seconds=seconds)
+    elapsed = max(0.001, time.perf_counter() - t0)
+    return st, {"sent": stats["samples"], "client_pps": round(stats["samples"] / elapsed),
+                "config_packets": stats["config_packets"], "max_late_ms": round(stats["max_late_s"] * 1000, 1)}
+
+
+def idn_flood_negative(s: IDNSender, points, rate: int, seconds: float, pace_factor: float,
+                       pkt: int = 64) -> dict:
+    """NEGATIVE TEST ONLY: declare `rate` but send pace_factor times faster.
+
+    This sends ahead of its own timestamps, which IDN-Hello 6 forbids; it
+    exists to measure what the board does without flow control. It builds
+    packets directly (configuration on every packet) instead of using
+    IDNStream, and closes on the same socket at the end.
+    """
+    cfg = StreamConfig(pps=rate, packet_points=pkt)
+    seq = random.randrange(0x10000)
     sent, idx = 0, 0
-    while sent < count:
-        batch = []
-        for _ in range(min(pkt, count - sent)):
-            batch.append(points[idx])
-            idx = (idx + 1) % len(points)
-        s.send_points_packet(batch, rate)
-        sent += len(batch)
-    return sent
-
-
-def idn_feed(s: IDNSender, points, rate: int, seconds: float, pace_factor: float = 1.0,
-             pkt: int = 64) -> int:
-    """Send packets declaring `rate`, but deliver them pace_factor times faster."""
-    idx = 0
-    sent = 0
-    interval = pkt / rate / pace_factor
-    next_send = time.perf_counter()
-    end = next_send + seconds
+    t0 = time.perf_counter()
+    next_send, end = t0, t0 + seconds
     while time.perf_counter() < end:
         batch = []
         for _ in range(pkt):
             batch.append(points[idx])
             idx = (idx + 1) % len(points)
-        s.send_points_packet(batch, rate)
+        off = boundary_us(sent, rate)
+        dur = boundary_us(sent + pkt, rate) - off
+        msg = build_channel_message(cfg.channel, CHUNK_WAVE, off & 0xFFFFFFFF, cfg.config_block(),
+                                    build_wave_chunk(cfg.sdm, dur, b"".join(encode_sample(p) for p in batch)))
+        s.sock.sendto(build_hello_header(IDNCMD_RT_CHANNEL, cfg.group, seq) + msg, s.addr)
+        seq = (seq + 1) & 0xFFFF
         sent += pkt
-        next_send += interval
-        if next_send - time.perf_counter() < -0.25:
-            next_send = time.perf_counter()
+        next_send += pkt / rate / pace_factor
         wait_until_precise(next_send)
-    return {"sent": sent, "client_pps": round(sent / (time.perf_counter() - (end - seconds)))}
+    s.sock.sendto(build_close_packet(cfg.group, seq), s.addr)
+    return {"sent": sent, "client_pps": round(sent / (time.perf_counter() - t0))}
 
 
 # -- test framework ----------------------------------------------------------
@@ -430,8 +469,8 @@ def t_cancel_before_start(ctx) -> Result:
         row = {"run": i + 1}
         idn = IDNSender(ctx.host, quiet=True)
         try:
-            idn_send_burst(idn, pts, 1024, 30000)
-            idn_close(idn)
+            st = idn_send_burst(idn, pts, 1024, 30000)
+            row["close_ack"] = idn_close(st)
         finally:
             idn.close_socket()
         time.sleep(0.4)
@@ -574,27 +613,44 @@ def t_ed_rate_change(ctx) -> Result:
 
 
 def t_idn_timeout(ctx) -> Result:
-    """Send 1 s of IDN points, then go silent without closing: when does output stop?"""
+    """Send 1 s of IDN points, then go silent: output stop and link release vs the 1 s link timeout."""
     res = Result("idn-timeout")
     require_idle(ctx.host)
     pts = make_circle(8000, 360)
+    limit = IDN_LINK_TIMEOUT_S + IDN_TIMEOUT_TOLERANCE_S
     idn = IDNSender(ctx.host, quiet=True)
     try:
-        idn_feed(idn, pts, 30000, 1.0)
+        st, _ = idn_feed(idn, pts, 30000, 1.0)
         t0 = time.perf_counter()
-        stopped = wait_for(lambda: not status(ctx.host, refresh=True)["remote_running"], 15.0, poll_s=0.2)
+        stopped = wait_for(lambda: not status(ctx.host, refresh=True)["remote_running"], limit, poll_s=0.05)
+        wait_until_precise(t0 + limit)
+        # Link release, measured separately: on the same socket, an empty
+        # close-with-ACK answers 0xEB only when the connection is gone
+        # (IDN-Hello 6.2.2 / 6.3.3). If it is still open, this closes it.
+        close_ack = idn_close(st)
+        probe_s = time.perf_counter() - t0
+        late_stop = None
+        if stopped is None:
+            late_stop = wait_for(lambda: not status(ctx.host, refresh=True)["remote_running"], 5.0, poll_s=0.2)
     finally:
         idn.close_socket()
-    st = status(ctx.host, refresh=True)
-    res.rows.append({"silence_to_stop_s": None if stopped is None else round(stopped, 2),
-                     "fill_after": st["remote_buffer_fill_samples"], "running_after": st["remote_running"]})
-    res.check("output stopped after the sender went silent", stopped is not None)
-    res.check("buffer empty afterwards", st["remote_buffer_fill_samples"] == 0)
+    st_after = status(ctx.host, refresh=True)
+    res.rows.append({"output_stop_s": None if stopped is None else round(stopped, 2),
+                     "late_stop_after_probe_s": None if late_stop is None else round(late_stop, 2),
+                     "probe_at_s": round(probe_s, 2),
+                     "close_ack": None if close_ack is None else f"0x{close_ack:02X}",
+                     "fill_after": st_after["remote_buffer_fill_samples"], "running_after": st_after["remote_running"]})
+    res.check(f"output stopped within {limit:.1f} s of silence (1 s link timeout + {IDN_TIMEOUT_TOLERANCE_S} s observation)",
+              stopped is not None)
+    res.check(f"link released by {limit:.1f} s (empty close-with-ACK answered 0xEB)", close_ack == 0xEB)
+    res.check("buffer empty afterwards", st_after["remote_buffer_fill_samples"] == 0)
+    if close_ack is None:
+        res.notes.append("no ACK to the close probe: link state unknown")
     return res
 
 
 def t_idn_overrun(ctx) -> Result:
-    """IDN sender declares 30 kpps but delivers 2x faster for 3 s (no flow control)."""
+    """NEGATIVE: IDN packets declare 30 kpps but arrive 2x faster for 3 s (sent ahead of timestamps)."""
     res = Result("idn-overrun")
     require_idle(ctx.host)
     pts = make_circle(8000, 360)
@@ -603,9 +659,8 @@ def t_idn_overrun(ctx) -> Result:
     idn = IDNSender(ctx.host, quiet=True)
     try:
         sampler.start()
-        feed = idn_feed(idn, pts, 30000, 3.0, pace_factor=2.0)
+        feed = idn_flood_negative(idn, pts, 30000, 3.0, pace_factor=2.0)
         sent = feed["sent"]
-        idn.stop()
     finally:
         sampler.stop()
         idn.close_socket()
@@ -628,21 +683,22 @@ def t_idn_overrun(ctx) -> Result:
 
 
 def t_idn_packet_size(ctx) -> Result:
-    """IDN loss on the ESP32 vs points per packet (64/120/180) at 30 and 50 kpps."""
+    """IDN loss on the ESP32 vs points per packet (64/120/179) at 30 and 50 kpps."""
     res = Result("idn-packet-size")
     require_idle(ctx.host)
     for rate, radius in ((30000, 12000), (50000, 8000)):
         if rate > ctx.galvo_max:
             continue
         pts = make_circle(radius, 480)
-        for pkt in (64, 120, 180):
+        # 179 is the most a configured packet holds in a 1472-octet UDP payload.
+        for pkt in (64, 120, 179):
             before = status(ctx.host, refresh=True)
             sampler = Sampler(ctx.host)
             idn = IDNSender(ctx.host, quiet=True)
             try:
                 sampler.start()
-                feed = idn_feed(idn, pts, rate, 5.0, pkt=pkt)
-                idn_close(idn)
+                st, feed = idn_feed(idn, pts, rate, 5.0, pkt=pkt)
+                close_ack = idn_close(st)
             finally:
                 sampler.stop()
                 idn.close_socket()
@@ -650,15 +706,18 @@ def t_idn_packet_size(ctx) -> Result:
             after = status(ctx.host, refresh=True)
             reached = after["stream_idn_samples"] - before["stream_idn_samples"]
             rows = sampler.rows[1:]
-            res.rows.append({"rate": rate, "pkt": pkt, "bytes": 4 + 8 + 4 + pkt * 8,
+            res.rows.append({"rate": rate, "pkt": pkt, "bytes_configured": 36 + pkt * 8, "bytes_plain": 16 + pkt * 8,
                              "packets_ps": round(rate / pkt), "client_pps": feed["client_pps"],
+                             "max_late_ms": feed["max_late_ms"],
                              "sent": feed["sent"], "reached_rp": reached,
                              "lost_pct": round(100.0 * (feed["sent"] - reached) / feed["sent"], 1),
                              "underruns_ps_max": max((r["underruns_ps"] for r in rows), default=None),
+                             "close_ack": None if close_ack is None else f"0x{close_ack:02X}",
                              "stop_s": None if stopped is None else round(stopped, 2)})
             time.sleep(0.5)
     for r in res.rows:
         res.check(f"{r['rate']} pps, {r['pkt']}/packet: loss {r['lost_pct']}% <= 1%", r["lost_pct"] <= 1.0)
+        res.check(f"{r['rate']} pps, {r['pkt']}/packet: close acknowledged with 0x00", r["close_ack"] == "0x00")
     return res
 
 
@@ -692,8 +751,8 @@ def t_throughput(ctx) -> Result:
                 idn = IDNSender(ctx.host, quiet=True)
                 try:
                     sampler.start()
-                    feed = idn_feed(idn, pts, rate, seconds)
-                    idn_close(idn)
+                    st, feed = idn_feed(idn, pts, rate, seconds)
+                    idn_close(st)
                 finally:
                     sampler.stop()
                     idn.close_socket()
