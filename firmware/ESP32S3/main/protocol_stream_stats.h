@@ -11,6 +11,9 @@ typedef enum {
 
 typedef struct {
     uint32_t sd_ilda_samples;
+    /* Samples the IDN feed handed to the DAC engine in accepted SPI packets,
+       including blanked samples inserted at discontinuities
+       (idn_recovery_samples in the status API); not proof of rendering. */
     uint32_t idn_samples;
     uint32_t etherdream_samples;
     uint32_t ilw_samples;

@@ -37,7 +37,7 @@ static QueueHandle_t s_preview_queue = NULL;
 #define WEB_SERVER_TASK_STACK_BYTES 16384
 #define WEB_SD_PATH_MAX 191
 #define WEB_SD_REL_PATH_MAX (WEB_SD_PATH_MAX - sizeof(SD_MOUNT_POINT))
-#define WEB_RP_STATUS_JSON_BYTES 2560
+#define WEB_RP_STATUS_JSON_BYTES 3584
 #define WEB_NETWORK_JSON_BYTES 2048
 #define WEB_PROTOCOL_JSON_BYTES 960
 #define WEB_JSON_CHUNK_BYTES 768
@@ -742,6 +742,9 @@ static esp_err_t rp_status_get_handler(httpd_req_t *req)
     protocol_stream_stats_t streams = {0};
     protocol_stream_stats_get(&streams);
 
+    idn_protocol_counters_t idn = {0};
+    idn_protocol_get_counters(&idn);
+
     char *json = malloc(WEB_RP_STATUS_JSON_BYTES);
     if (!json) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No memory");
@@ -808,6 +811,24 @@ static esp_err_t rp_status_get_handler(httpd_req_t *req)
             "\"stream_idn_dropped\":%lu,"
             "\"stream_etherdream_dropped\":%lu,"
             "\"stream_ilw_dropped\":%lu,"
+            "\"idn_rx_datagrams\":%lu,"
+            "\"idn_rt_accepted\":%lu,"
+            "\"idn_malformed\":%lu,"
+            "\"idn_seq_duplicates\":%lu,"
+            "\"idn_seq_late\":%lu,"
+            "\"idn_seq_stale\":%lu,"
+            "\"idn_seq_missing\":%lu,"
+            "\"idn_seq_resyncs\":%lu,"
+            "\"idn_ts_before\":%lu,"
+            "\"idn_ts_resyncs\":%lu,"
+            "\"idn_continuity_errors\":%lu,"
+            "\"idn_rate_rejects\":%lu,"
+            "\"idn_chunk_rejects\":%lu,"
+            "\"idn_queued_samples\":%lu,"
+            "\"idn_recovery_samples\":%lu,"
+            "\"idn_requested_rate_mhz\":%lu,"
+            "\"idn_selected_rate\":%lu,"
+            "\"idn_acks_sent\":%lu,"
             "\"test_stream_running\":%s,"
             "\"ilda_running\":%s,"
             "\"ilda_file\":\"%s\","
@@ -859,6 +880,24 @@ static esp_err_t rp_status_get_handler(httpd_req_t *req)
         (unsigned long)streams.idn_dropped,
         (unsigned long)streams.etherdream_dropped,
         (unsigned long)streams.ilw_dropped,
+        (unsigned long)idn.rx_datagrams,
+        (unsigned long)idn.rt_accepted,
+        (unsigned long)idn.malformed,
+        (unsigned long)idn.seq_duplicates,
+        (unsigned long)idn.seq_late,
+        (unsigned long)idn.seq_stale,
+        (unsigned long)idn.seq_missing,
+        (unsigned long)idn.seq_resyncs,
+        (unsigned long)idn.ts_before,
+        (unsigned long)idn.ts_resyncs,
+        (unsigned long)idn.continuity_errors,
+        (unsigned long)idn.rate_rejects,
+        (unsigned long)idn.chunk_rejects,
+        (unsigned long)idn.queued_samples,
+        (unsigned long)idn.recovery_samples,
+        (unsigned long)idn.requested_rate_mhz,
+        (unsigned long)idn.selected_rate,
+        (unsigned long)idn.acks_sent,
         rp.test_stream_running ? "true" : "false",
         ilda_player_is_running() ? "true" : "false",
         escaped_ilda_file,
