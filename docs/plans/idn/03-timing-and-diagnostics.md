@@ -1,6 +1,6 @@
 # IDN plan 03: Timing, rate boundaries, and truthful diagnostics
 
-Status: planned; numerical policies and hardware timing require validation.
+Status: partly implemented on branch `idn/03-timing-and-diagnostics` (host tests only; no ESP/RP build or hardware run). Numerical policies and hardware timing still require validation.
 
 ## Goal
 
@@ -188,11 +188,32 @@ Hardware tests must correlate packet capture, ESP/RP counters, and scope/logic-a
 
 ## Done criteria
 
-- [ ] Every accepted wave chunk has checked chronology and per-channel continuity.
-- [ ] Sequence and timestamp wraps do not create false loss or stale replay.
-- [ ] Queued samples retain timing/owner boundaries; unsupported transitions are rejected explicitly.
-- [ ] Rate quantization is handled without weakening hardware safety limits.
-- [ ] ACK result/events/status match their defined scopes and survive concurrent updates.
-- [ ] Unknown latency/quality stay unknown until evidence supports estimates.
-- [ ] Discovery and application counters no longer claim unavailable knowledge.
-- [ ] All-target builds, host fixtures, and measured timing tests are recorded.
+- [x] Every accepted wave chunk has checked chronology and per-channel continuity. (ESP receiver; host-checked only.)
+- [x] Sequence and timestamp wraps do not create false loss or stale replay.
+- [ ] Queued samples retain timing/owner boundaries; unsupported transitions are rejected explicitly. (Rejection done; chunk descriptors/owner tokens not done.)
+- [x] Rate quantization is handled without weakening hardware safety limits.
+- [ ] ACK result/events/status match their defined scopes and survive concurrent updates. (Done except 0xED/XCLD, which need plan 02's group mask, and DOBuf completion accounting.)
+- [x] Unknown latency/quality stay unknown until evidence supports estimates.
+- [x] Discovery and application counters no longer claim unavailable knowledge.
+- [ ] All-target builds, host fixtures, and measured timing tests are recorded. (Host tests only.)
+
+## Implementation record (branch `idn/03-timing-and-diagnostics`)
+
+Increments 1, 2, 4 (fallback only) and 5 are implemented; 3 and 6 are not.
+
+- Pure module `firmware/ESP32S3/main/idn_timing.c/.h`, tested by `tests/idn/native/timing/` (CMake/CTest, host gcc, `-Wall -Wextra -Werror`). Its structs are small and meant to be embedded in plan 02's session/channel state.
+- Integrated into `idn_protocol.c` with the current (pre-plan-02) session model. `web_server.c` reports `idn_*` counters.
+
+Decisions taken (project policy, not normative):
+
+| Topic | Decision |
+|---|---|
+| Malformed vs 0xEE | Framing failures (short header, declared size, truncated config header) never open/refresh a session. 0x40/0x44: silent drop. 0x41/0x45: 0xEE with all other fields zero. Not yet checked against a reference implementation. |
+| Sequence | 32-entry window, serial arithmetic. Forward 1..0x7FFF accepted; 0x8000 is treated as older. Duplicates, late (unseen, in window) and stale packets are dropped, not reordered, and do not refresh the link. Type 1 on every irregularity; type 2 duplicates; type 3 when unseen numbers leave the window, so a late packet is never also counted lost. Four consecutive stale numbers re-baseline. ACK result: 0x00 for a duplicate (first copy was passed on), 0xEF for late/stale. |
+| Timestamps | Unwrapped by signed 32-bit difference (forward up to 2^31 - 1 us). Earlier: dropped with BPErr. Eight consecutive earlier, non-decreasing timestamps re-base the timeline and end all wave epochs. Fragments (0xC0+) are excluded. A new source port from the session's host restarts sequence/timestamp timelines and reports New. |
+| Continuity | Exact equality. On a gap/overlap: CTYErr, drop, 16 blanked samples at the last point, then drop wave data until a routing configuration (an identical repeat suffices). An auto-opened channel (legacy, no config) is closed instead and re-opens on the next chunk. A new epoch after earlier output starts with 16 blanked samples at its first point. Recovery samples are counted separately. |
+| Rate | Envelope of +/-1 us per chunk (covers cumulative, per-chunk-rounding and truncating senders; window halved past ~16.8 s). Reject zero duration, < 1 kHz, epoch lower bound above `min(ESP limit, RP limit)`, or a chunk inconsistent with the epoch or the locked rate (RGUErr). At a 30 k limit, 64-sample chunks of 2133/2134 us (including the in-repo sender's constant 2133 us) are accepted and played at 30,000; 30,050, 30,100 and 50,000 pps are rejected. The cost: an accepted stream may be slowed by up to its own quantization (1 us per chunk), and smaller genuine changes are not detectable. No RATE at receive time: the feed applies the rate once before START, locked for the session. |
+| ACK | Input latch per session, pipeline latch per channel, cleared after a successful send only, generation-checked. CnlClsd from state; CnlRted on first route or mode change. Empty RT ACK: pipeline 0. SNMsg = ESP ring non-empty; DOBuf set from the first delivered packet until the feed stops (conservative, never "drained" early). Latency and link quality 0. |
+| Scan | OCPD while the single session is held; MALFN/Offline/XCLD never set. |
+
+Not done: ESP-to-RP rate-boundary transport, chunk descriptors and owner tokens, measured DOBuf/latency, link quality estimator, V1 yield-gap analysis, overflow policy (ring-full drops still drop the newest samples, now with OVErr), and every hardware/scope measurement.
