@@ -216,6 +216,8 @@ It supports IDN-Hello discovery, allowing compatible software to find the device
 
 Once connected, incoming IDN real-time stream data is parsed, converted into the internal 8-channel sample format, and forwarded to the RP2354 output engine.
 
+The stream must open its channel with a service configuration (tag dictionary) that has X, Y and at least one colour; there is no built-in default layout. Colours are matched to the nearest of 638, 532 and 460 nm (R, G, B). Wave chunks must hold at least 20 whole samples. Configurations using multiple scan heads (Break), sample-controlled shutter (`0x4101`), wavelength prefixes or Space Modifier transformations the board does not perform are rejected and logged, not played approximately. `firmware/ESP32S3/main/idn_decoder.h` lists the exact rules. This is a subset of the standard, not a conformance claim.
+
 If the stream pauses between packets, the scanners hold their last position with all color and intensity channels blanked, so the last colored point is never repeated.
 
 IDN has no flow control: the sender streams at its own pace. The board queues 3,072 points (about 100 ms at 30 kpps) on the RP2354 before output starts, and that queue absorbs gaps in the sender's stream. A gap longer than the queue shows up as blanking. `IDN_FEED_PREBUFFER` in `ESP32S3/main/idn_protocol.c` trades latency against tolerance for sender hiccups.
