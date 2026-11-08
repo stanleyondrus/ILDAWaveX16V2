@@ -221,6 +221,40 @@ static void test_chronology(void)
     CHECK_EQ(idn_chronology_check(&c, 0x7FFFFFFFu, &u1), IDN_TS_FORWARD);
     CHECK_EQ(idn_chronology_check(&c, 0x80000000u, &u1), IDN_TS_BEFORE);
 
+    /* Restarted sender clock: 8 earlier, non-decreasing messages re-base. */
+    idn_chronology_reset(&c);
+    idn_chronology_check(&c, 5000000, &u0);
+    idn_chronology_commit(&c, u0);
+    for (uint32_t k = 1; k <= 8; k++) {
+        CHECK_EQ(idn_chronology_check(&c, 100 * k, &u1), IDN_TS_BEFORE);
+        bool resync = idn_chronology_before(&c, 100 * k, &u1);
+        CHECK_EQ(resync, k == 8);
+    }
+    CHECK_EQ(u1, 0x100000320ull);
+    CHECK_EQ(idn_chronology_check(&c, 900, &u1), IDN_TS_FORWARD);
+    CHECK_EQ(u1, 0x100000384ull);
+
+    /* Scattered earlier messages never re-base; an accepted one restarts the count. */
+    idn_chronology_reset(&c);
+    idn_chronology_check(&c, 5000000, &u0);
+    idn_chronology_commit(&c, u0);
+    {
+        bool any = false;
+        for (uint32_t k = 0; k < 20; k++) {
+            uint32_t ts = (k & 1u) ? 100u : 50u;
+            any |= idn_chronology_before(&c, ts, &u1);
+        }
+        CHECK(!any);
+        idn_chronology_check(&c, 5000001, &u1);
+        idn_chronology_commit(&c, u1);
+        for (uint32_t k = 1; k <= 7; k++)
+            any |= idn_chronology_before(&c, 1000 + k, &u1);
+        idn_chronology_check(&c, 5000002, &u1);
+        idn_chronology_commit(&c, u1);
+        any |= idn_chronology_before(&c, 1008, &u1);
+        CHECK(!any);
+    }
+
     /* Only non-fragment chunk types carry a timestamp. */
     CHECK(idn_chunk_has_timestamp(0x00));
     CHECK(idn_chunk_has_timestamp(0x01));

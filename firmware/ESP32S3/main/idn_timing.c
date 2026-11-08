@@ -162,6 +162,27 @@ void idn_chronology_commit(idn_chronology_t *c, uint64_t unwrapped_us)
         c->last_us = unwrapped_us;
     }
     c->valid = true;
+    c->before_run = 0;
+}
+
+bool idn_chronology_before(idn_chronology_t *c, uint32_t wire_us, uint64_t *unwrapped_us)
+{
+    if (c->before_run > 0 && (int32_t)(wire_us - c->before_last) >= 0) {
+        c->before_run++;
+    } else {
+        c->before_run = 1;
+    }
+    c->before_last = wire_us;
+
+    if (c->before_run < IDN_TS_RESYNC_RUN) {
+        return false;
+    }
+
+    c->valid      = true;
+    c->before_run = 0;
+    c->last_us    = (1ull << 32) | wire_us;
+    if (unwrapped_us) *unwrapped_us = c->last_us;
+    return true;
 }
 
 /* -- Wave continuity ------------------------------------------------------- */

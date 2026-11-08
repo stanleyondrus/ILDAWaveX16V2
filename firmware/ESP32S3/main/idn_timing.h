@@ -145,9 +145,20 @@ idn_seq_result_t idn_seq_observe(idn_seq_tracker_t *t, uint16_t seq);
  *
  * Check and commit are separate so a message rejected for another reason
  * can be left out of the baseline deliberately.
+ *
+ * Project policy against lockout: after a BEFORE verdict the caller passes
+ * the message to idn_chronology_before(). Once IDN_TS_RESYNC_RUN
+ * consecutive earlier messages form their own non-decreasing timeline (a
+ * sender that restarted its clock), the chronology is re-based on a fresh
+ * unwrapped origin; the caller must then end every channel's wave epoch,
+ * because unwrapped values from before and after are not comparable.
  */
+#define IDN_TS_RESYNC_RUN       8u
+
 typedef struct {
     bool     valid;
+    uint8_t  before_run;    /* consecutive earlier messages */
+    uint32_t before_last;   /* wire timestamp of the latest earlier message */
     uint64_t last_us;       /* unwrapped timestamp of the last accepted message */
 } idn_chronology_t;
 
@@ -165,6 +176,12 @@ void idn_chronology_reset(idn_chronology_t *c);
 idn_ts_order_t idn_chronology_check(const idn_chronology_t *c, uint32_t wire_us,
                                     uint64_t *unwrapped_us);
 void idn_chronology_commit(idn_chronology_t *c, uint64_t unwrapped_us);
+/*
+ * Note a message that got IDN_TS_BEFORE. Returns true when it completes a
+ * resync run: the chronology now starts at this message (*unwrapped_us),
+ * which may be accepted. Returns false while it must still be dropped.
+ */
+bool idn_chronology_before(idn_chronology_t *c, uint32_t wire_us, uint64_t *unwrapped_us);
 
 /* ========================================================================== */
 /* Per-channel wave continuity (Stream 6.1)                                   */
