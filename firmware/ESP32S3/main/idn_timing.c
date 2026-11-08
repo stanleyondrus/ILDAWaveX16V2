@@ -291,20 +291,22 @@ idn_rate_verdict_t idn_rate_check(const idn_rate_policy_t *p, const idn_rate_epo
     /* Lower bound of the epoch including this chunk above the limit. */
     uint64_t total_n = e->samples + n;
     uint64_t total_d = e->duration_us + d;
-    if (prod_less(p->limit_hz, total_d + q, total_n, US_PER_S)) {
+    uint64_t total_q = (e->chunks + 1u) * q;
+    if (prod_less(p->limit_hz, total_d + total_q, total_n, US_PER_S)) {
         return IDN_RATE_ABOVE_LIMIT;
     }
 
     if (e->samples > 0) {
         uint64_t en = e->samples;
         uint64_t ed = e->duration_us;
+        uint64_t eq = e->chunks * q;
 
-        /* Chunk upper bound n/(d-q) below epoch lower bound en/(ed+q). */
-        if (d > q && prod_less(n, ed + q, en, d - q)) {
+        /* Chunk upper bound n/(d-q) below epoch lower bound en/(ed+eq). */
+        if (d > q && prod_less(n, ed + eq, en, d - q)) {
             return IDN_RATE_CHANGED;
         }
-        /* Epoch upper bound en/(ed-q) below chunk lower bound n/(d+q). */
-        if (ed > q && prod_less(en, d + q, n, ed - q)) {
+        /* Epoch upper bound en/(ed-eq) below chunk lower bound n/(d+q). */
+        if (ed > eq && prod_less(en, d + q, n, ed - eq)) {
             return IDN_RATE_CHANGED;
         }
     }
@@ -326,10 +328,12 @@ void idn_rate_commit(idn_rate_epoch_t *e, uint32_t samples, uint32_t duration_us
 {
     e->samples     += samples;
     e->duration_us += duration_us;
+    e->chunks      += 1u;
 
     while (e->duration_us > IDN_RATE_WINDOW_US) {
         e->samples     /= 2u;
         e->duration_us /= 2u;
+        e->chunks       = (e->chunks + 1u) / 2u;
     }
 }
 

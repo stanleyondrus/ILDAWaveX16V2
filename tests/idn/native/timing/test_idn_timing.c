@@ -396,23 +396,37 @@ static void test_rate(void)
         CHECK_EQ(idn_rate_check(&POLICY_30K, &e, 64, 2134, 30000), IDN_RATE_OK);
     }
 
-    /* Constant 2133 us per 64 samples is 30,004.7 pps: sustained above the
-       limit, rejected on the 4th chunk (64e6*k > 30000*(2133k + 1) for k > 3). */
+    /* Constant 2133 us per 64 samples (30,004.7 pps, a sender rounding each
+       chunk on its own) is inside the per-chunk quantization envelope of
+       30 kpps: accepted, and played at the limit, never above it. */
     idn_rate_reset(&e);
     {
-        idn_rate_verdict_t v = IDN_RATE_OK;
-        uint32_t k;
-        for (k = 1; k <= 10; k++) {
-            v = idn_rate_check(&POLICY_30K, &e, 64, 2133, 0);
-            if (v != IDN_RATE_OK) break;
+        idn_rate_verdict_t first_bad = IDN_RATE_OK;
+        for (uint32_t k = 0; k < 20000; k++) {
+            idn_rate_verdict_t v = idn_rate_check(&POLICY_30K, &e, 64, 2133, 0);
+            if (v != IDN_RATE_OK && first_bad == IDN_RATE_OK) first_bad = v;
             idn_rate_commit(&e, 64, 2133);
         }
-        CHECK_EQ(v, IDN_RATE_ABOVE_LIMIT);
-        CHECK_EQ(k, 4);
-        /* What was accepted is played no faster than the limit. */
+        CHECK_EQ(first_bad, IDN_RATE_OK);
         CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 30000);
-        CHECK_EQ(idn_rate_requested_mhz(&e), 30004688);
     }
+    idn_rate_reset(&e);
+    idn_rate_commit(&e, 64, 2133);
+    idn_rate_commit(&e, 64, 2133);
+    idn_rate_commit(&e, 64, 2133);
+    CHECK_EQ(idn_rate_requested_mhz(&e), 30004688);
+    CHECK_EQ(idn_rate_select(&POLICY_30K, &e), 30000);
+
+    /* Genuine 30,050 pps (64 samples, 2129/2130 us): sustained demand above
+       the limit even allowing 1 us per chunk; rejected within a few chunks. */
+    idn_rate_reset(&e);
+    bad = 0;
+    CHECK_EQ(feed_cumulative(&e, &POLICY_30K, 64, 30050, 100, &bad), IDN_RATE_ABOVE_LIMIT);
+    CHECK_EQ(bad, 1);
+    idn_rate_reset(&e);
+    bad = 0;
+    CHECK_EQ(feed_cumulative(&e, &POLICY_30K, 20, 30050, 1000, &bad), IDN_RATE_ABOVE_LIMIT);
+    CHECK(bad >= 1 && bad <= 10);
 
     /* Genuine 30,100 pps: rejected on the first chunk. */
     idn_rate_reset(&e);

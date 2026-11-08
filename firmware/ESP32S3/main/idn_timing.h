@@ -239,20 +239,26 @@ bool idn_wave_verdict_is_error(idn_wave_verdict_t v);
 
 /*
  * A wave chunk of n samples over d microseconds asks for n * 1e6 / d Hz.
- * Senders quantize durations to whole microseconds, so with cumulative
- * rounding each chunk's ideal duration lies within d +/- resolution_us, and
- * the summed duration of a continuous epoch within D +/- resolution_us. A
- * rate is judged by that envelope, never by a single rounded quotient:
+ * Senders quantize each duration to whole microseconds, by cumulative
+ * rounding, per-chunk rounding or truncation, so each chunk's ideal
+ * duration is taken to lie within d +/- resolution_us, and an epoch of k
+ * chunks within D +/- k * resolution_us. A rate is judged by that
+ * envelope, never by a single rounded quotient:
  *
  *   - n == 0 or d == 0: INVALID.
  *   - Chunk envelope entirely below min_hz: BELOW_MIN.
  *   - Lower bound of the epoch including this chunk, (N + n) * 1e6 /
- *     (D + d + resolution), above limit_hz: ABOVE_LIMIT. A 30 kpps stream
- *     quantized to 2133/2134 us per 64 samples passes a 30 kpps limit; a
- *     30,100 pps or 50 kpps stream, or a constant 2133 us (30,004.7 pps)
- *     sustained for a few chunks, does not. The limit is never raised.
+ *     (D + d + (k + 1) * resolution), above limit_hz: ABOVE_LIMIT. A 30 kpps
+ *     stream of 64-sample chunks quantized to 2133 and/or 2134 us passes a
+ *     30 kpps limit; 30,050 pps, 30,100 pps and 50 kpps streams in chunks
+ *     of 20 or more samples do not. The
+ *     limit is never raised: accepted streams are played at no more than
+ *     limit_hz (idn_rate_select), and the most an accepted stream can be
+ *     slowed is its own quantization uncertainty, 1 us per chunk.
  *   - Chunk envelope disjoint from the epoch envelope, or (once the output
- *     rate is locked) not within 1 Hz of the locked rate: CHANGED.
+ *     rate is locked) not within 1 Hz of the locked rate: CHANGED. Changes
+ *     smaller than the quantization envelope cannot be told apart from
+ *     rounding and are accepted.
  *
  * Project policy (first-release fallback): one stable rate per continuous
  * output run. The output rate is selected once, before output starts, from
@@ -264,12 +270,13 @@ bool idn_wave_verdict_is_error(idn_wave_verdict_t v);
 typedef struct {
     uint32_t min_hz;
     uint32_t limit_hz;      /* scanner safety limit: authoritative */
-    uint32_t resolution_us; /* timestamp quantization envelope, normally 1 */
+    uint32_t resolution_us; /* per-chunk duration quantization, normally 1 */
 } idn_rate_policy_t;
 
 typedef struct {
     uint64_t samples;       /* N: samples accepted in the epoch */
     uint64_t duration_us;   /* D: their summed duration */
+    uint64_t chunks;        /* k: chunks they came in */
 } idn_rate_epoch_t;
 
 typedef enum {
