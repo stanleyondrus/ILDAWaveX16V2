@@ -33,6 +33,12 @@ typedef struct {
     uint32_t last_gen;
     idn_stop_reason_t last_reason;
     bool decoder[IDN_SESSION_CHANNELS];
+
+    /* Plan 03 rate/epoch hooks */
+    uint32_t limit_hz;
+    uint32_t lock_hz;       /* rate locked once the output is held */
+    int epoch_starts;
+    int epoch_breaks;
 } fake_t;
 
 static fake_t g_fake;
@@ -62,7 +68,8 @@ static void fake_discard(void *ctx, uint8_t ch)
     f->decoder[ch] = false;
 }
 
-static idn_chunk_result_t fake_check(void *ctx, uint8_t ch, const uint8_t *chunk, uint16_t len)
+static idn_chunk_result_t fake_check(void *ctx, uint8_t ch, const uint8_t *chunk, uint16_t len,
+                                     uint32_t *samples)
 {
     fake_t *f = ctx;
     (void)chunk;
@@ -72,6 +79,7 @@ static idn_chunk_result_t fake_check(void *ctx, uint8_t ch, const uint8_t *chunk
     if (len < 4 + 20 * 8 || (len - 4) % 8 != 0) {
         return IDN_CHUNK_TOO_SHORT;
     }
+    *samples = (uint32_t)(len - 4) / 8u;
     return IDN_CHUNK_OK;
 }
 
@@ -122,6 +130,28 @@ static bool fake_quiescent(void *ctx)
     return f->quiescent;
 }
 
+static void fake_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *p, uint32_t *locked)
+{
+    fake_t *f = ctx;
+    p->min_hz = 1000;
+    p->limit_hz = f->limit_hz;
+    p->resolution_us = 1;
+    *locked = (gen != 0 && f->held && gen == f->held_gen) ? f->lock_hz : 0;
+}
+
+static void fake_wave_epoch(void *ctx, uint8_t ch, uint32_t gen, bool start)
+{
+    fake_t *f = ctx;
+    if (!f->held || gen != f->held_gen || !f->decoder[ch]) {
+        f->violations++;
+    }
+    if (start) {
+        f->epoch_starts++;
+    } else {
+        f->epoch_breaks++;
+    }
+}
+
 static const idn_session_ops_t k_ops = {
     .ctx = &g_fake,
     .config_compile = fake_compile,
@@ -131,6 +161,8 @@ static const idn_session_ops_t k_ops = {
     .wave_enqueue = fake_enqueue,
     .output_release = fake_release,
     .output_quiescent = fake_quiescent,
+    .rate_limits = fake_rate_limits,
+    .wave_epoch = fake_wave_epoch,
 };
 
 /* -- Packet builder --------------------------------------------------------- */
@@ -151,9 +183,19 @@ typedef struct {
     uint8_t scm;
     int     size_delta;     /* corrupt the declared total size */
     uint8_t scwc_extra;     /* declare more configuration words than sent */
+
+    /* Plan 03 timeline (the runner keeps one timeline per channel) */
+    uint32_t dur;           /* wave duration in us; 0: 33 us per sample */
+    int32_t  ts_jump;       /* move this channel's timeline first (a lost or skewed interval) */
+    bool     replay;        /* resend at the previous timestamp; timeline not advanced */
 } msg_spec_t;
 
-static size_t build_msg(const msg_spec_t *m, uint8_t *buf)
+static uint32_t wave_duration(const msg_spec_t *m)
+{
+    return m->dur ? m->dur : m->nsamples * 33u;
+}
+
+static size_t build_msg(const msg_spec_t *m, uint32_t ts, uint8_t *buf)
 {
     if (!m->present) {
         return 0;
@@ -167,7 +209,8 @@ static size_t build_msg(const msg_spec_t *m, uint8_t *buf)
     size_t n = 8;
     buf[2] = (uint8_t)((m->not_channel_msg ? 0x00 : 0x80) | (m->cfg ? 0x40 : 0) | (m->ch & 0x3F));
     buf[3] = m->chunk;
-    buf[4] = 0x00; buf[5] = 0x01; buf[6] = 0x00; buf[7] = 0x00;
+    buf[4] = (uint8_t)(ts >> 24); buf[5] = (uint8_t)(ts >> 16);
+    buf[6] = (uint8_t)(ts >> 8);  buf[7] = (uint8_t)ts;
 
     if (m->cfg) {
         buf[n++] = (uint8_t)(m->scwc + m->scwc_extra);
@@ -184,7 +227,7 @@ static size_t build_msg(const msg_spec_t *m, uint8_t *buf)
     }
 
     if (m->chunk == IDN_CHUNK_WAVE) {
-        uint32_t dur = m->nsamples * 33u;
+        uint32_t dur = wave_duration(m);
         buf[n++] = (uint8_t)((m->scm & 3) << 4);
         buf[n++] = (uint8_t)(dur >> 16);
         buf[n++] = (uint8_t)(dur >> 8);
@@ -247,6 +290,13 @@ typedef struct {
     int set_acquire_ok;
     int set_release_ok;
     int set_quiescent;
+    int set_limit;      /* X(hz): scanner rate limit */
+    int set_lock;       /* X(hz): rate locked for the held output */
+    int64_t set_ts;     /* X(us): every channel's timeline restarts here */
+    int flush_ack;      /* X(1): the ACK held back by ack_lost is sent now */
+
+    int seq;            /* X(v): sequence number; 0: the step number */
+    bool ack_lost;      /* the ACK is not sent (yet): events must stay latched */
 
     int exp_result;     /* RT result / group response code */
     int exp_session;
@@ -257,6 +307,8 @@ typedef struct {
     int exp_status;
     int exp_mask;       /* group response mask */
     int exp_reason;     /* last release reason */
+    int exp_starts;     /* X(n): epoch starts signalled by this step */
+    int exp_breaks;     /* X(n): epoch breaks signalled by this step */
 
     int d_compile, d_acquire, d_enqueue, d_release;
 } step_t;
@@ -632,6 +684,117 @@ static const step_t s_truncated_config[] = {
     END
 };
 
+/* Plan 03: sequence, timestamps, continuity, rate and ACK latching. */
+
+#define M_VOID(c)               { .present = true, .ch = (c), .chunk = IDN_CHUNK_VOID }
+#define SEQ_T1                  IDN_INEV_SEQ_NOT_NEXT
+#define SEQ_T2                  IDN_INEV_SEQ_DUPLICATE
+
+static const step_t s_sequence[] = {
+    RT(.seq = X(65534), .ep = EP_A, .cmd = ACK, .msg = M_ROUTE_WAVE(0, 0),
+       .exp_iev = X(IDN_IEV_NEW), .exp_pev = X(IDN_PEV_CNLRTED), .exp_starts = X(1),
+       .d_compile = 1, .d_acquire = 1, .d_enqueue = 1),
+    RT(.seq = X(65535), .ep = EP_A, .cmd = IDN_CMD_RT_CHANNEL, .msg = M_WAVE(0, 0), .d_enqueue = 1),
+    /* 65535 -> 0 is ordinary progress */
+    RT(.seq = X(0), .ep = EP_A, .cmd = ACK, .msg = M_WAVE(0, 0),
+       .exp_iev = X(0), .exp_pev = X(0), .d_enqueue = 1),
+    /* Duplicate: ACKed 0x00, SeqErr types 1+2, not queued twice */
+    RT(.seq = X(0), .ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .replay = true },
+       .exp_result = X(IDN_RESULT_OK), .exp_iev = X(SEQ_T1 | SEQ_T2), .exp_pev = X(0)),
+    /* Gap over 1 and 2 */
+    RT(.seq = X(3), .ep = EP_A, .cmd = ACK, .msg = M_EMPTY,
+       .exp_result = X(IDN_RESULT_OK), .exp_iev = X(SEQ_T1)),
+    /* The delayed 2: dropped with 0xEF, and it does not refresh the link */
+    RT(.seq = X(2), .now = 900000, .ep = EP_A, .cmd = ACK, .msg = M_EMPTY,
+       .exp_result = X(IDN_RESULT_OTHER), .exp_iev = X(SEQ_T1)),
+    TICK(.now = 1000000, .exp_session = X(IDN_SESSION_FREE),
+         .exp_reason = X(IDN_STOP_TIMEOUT), .d_release = 1),
+    END
+};
+
+static const step_t s_timestamps[] = {
+    SET(.set_ts = X(0xFFFFFFF0)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE_WAVE(0, 0), .exp_pev = X(IDN_PEV_CNLRTED),
+       .exp_starts = X(1), .d_compile = 1, .d_acquire = 1, .d_enqueue = 1),
+    /* 0xFFFFFFF0 + 660 continues at 0x284 */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_WAVE(0, 0), .exp_pev = X(0),
+       .exp_starts = X(0), .exp_breaks = X(0), .d_enqueue = 1),
+    /* Wrong next timestamp: CTYErr, epoch ends blanked */
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .ts_jump = 33 },
+       .exp_pev = X(IDN_PEV_CTYERR), .exp_breaks = X(1)),
+    /* Continuous again, but no splice before a recovery boundary */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_WAVE(0, 0), .exp_pev = X(IDN_PEV_CTYERR), .exp_breaks = X(0)),
+    /* An identical repeated configuration recovers; no new route */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE(0, 0), .exp_pev = X(0),
+       .exp_ch = X(0), .exp_ch_state = X(IDN_CHANNEL_ROUTED_ACTIVE)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_WAVE(0, 0), .exp_pev = X(0), .exp_starts = X(1), .d_enqueue = 1),
+    /* An earlier timestamp: dropped, BPErr */
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_VOID, .ts_jump = -1000 },
+       .exp_iev = X(IDN_IEV_BPERR), .exp_pev = X(0)),
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_VOID, .ts_jump = 1000 },
+       .exp_iev = X(0)),
+    /* Equal Void timestamps are legal and do not move the wave timeline */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_VOID(0), .exp_iev = X(0)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_WAVE(0, 0), .exp_iev = X(0), .exp_pev = X(0), .d_enqueue = 1),
+    END
+};
+
+static const step_t s_rate[] = {
+    SET(.set_limit = X(30000)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE(0, 0), .d_compile = 1),
+    /* 20 samples / 667 us: within quantization of 30 kpps */
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .dur = 667 },
+       .exp_pev = X(0), .exp_starts = X(1), .d_acquire = 1, .d_enqueue = 1),
+    /* 50 kpps: rejected, not slowed; the epoch ends */
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .dur = 400 },
+       .exp_pev = X(IDN_PEV_RGUERR), .exp_breaks = X(1)),
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .dur = 667 },
+       .exp_pev = X(IDN_PEV_CTYERR)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE(0, 0), .exp_pev = X(0)),
+    /* The output now runs at a locked 30 kpps: 25 kpps is a genuine change */
+    SET(.set_lock = X(30000)),
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .dur = 800 },
+       .exp_pev = X(IDN_PEV_RGUERR), .exp_starts = X(0), .exp_breaks = X(0)),
+    RT(.ep = EP_A, .cmd = ACK,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .dur = 667 },
+       .exp_pev = X(0), .exp_starts = X(1), .d_enqueue = 1),
+    END
+};
+
+static const step_t s_ack_lost[] = {
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE_WAVE(0, 0), .ack_lost = true,
+       .exp_iev = X(IDN_IEV_NEW), .exp_pev = X(IDN_PEV_CNLRTED),
+       .d_compile = 1, .d_acquire = 1, .d_enqueue = 1),
+    /* Lost ACK: still reported. An empty RT ACK has no channel fields. */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_EMPTY, .exp_iev = X(IDN_IEV_NEW), .exp_pev = X(0),
+       .exp_status = X(IDN_STATUS_SOCNL)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_VOID(0), .exp_iev = X(0), .exp_pev = X(IDN_PEV_CNLRTED)),
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_VOID(0), .exp_iev = X(0), .exp_pev = X(0)),
+    END
+};
+
+static const step_t s_event_during_send[] = {
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE_WAVE(0, 0), .ack_lost = true,
+       .exp_iev = X(IDN_IEV_NEW), .exp_pev = X(IDN_PEV_CNLRTED),
+       .d_compile = 1, .d_acquire = 1, .d_enqueue = 1),
+    /* While that ACK is in flight, a discontinuity on the same channel */
+    RT(.ep = EP_A, .cmd = IDN_CMD_RT_CHANNEL,
+       .msg = { .present = true, .ch = 0, .chunk = IDN_CHUNK_WAVE, .nsamples = 20, .ts_jump = 33 },
+       .exp_breaks = X(1)),
+    SET(.flush_ack = X(1)),
+    /* Sending cleared what it reported, not what came after */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_VOID(0), .exp_iev = X(0), .exp_pev = X(IDN_PEV_CTYERR)),
+    END
+};
+
 static const scenario_t k_scenarios[] = {
     { "empty RT allocates session only",            s_empty_allocates_only },
     { "routing + Void chunk -> ROUTED_IDLE",         s_route_void_idle },
@@ -661,6 +824,11 @@ static const scenario_t k_scenarios[] = {
     { "chunk type and minimum length",               s_wrong_chunk_type },
     { "local cancel (web Stop)",                     s_user_cancel },
     { "truncated configuration voids the decoder",   s_truncated_config },
+    { "sequence wrap, duplicate, late packet",       s_sequence },
+    { "timestamp wrap, continuity, BPErr",           s_timestamps },
+    { "rate above limit and genuine rate change",    s_rate },
+    { "lost ACK keeps events latched",               s_ack_lost },
+    { "event during ACK send stays latched",         s_event_during_send },
 };
 
 /* -- Runner ----------------------------------------------------------------- */
@@ -676,18 +844,69 @@ static int g_failures;
         }                                                             \
     } while (0)
 
+/* Per-channel sender timelines, as a real continuous producer keeps them. */
+static uint32_t g_ts[EP_COUNT][IDN_SESSION_CHANNELS];
+static uint32_t g_ts_last[EP_COUNT][IDN_SESSION_CHANNELS];
+static bool     g_ts_used[EP_COUNT][IDN_SESSION_CHANNELS];
+static uint32_t g_ts_global[EP_COUNT];
+static uint16_t g_seq[EP_COUNT];
+
+static void timeline_reset(uint32_t start)
+{
+    for (int e = 0; e < EP_COUNT; e++) {
+        for (int i = 0; i < IDN_SESSION_CHANNELS; i++) {
+            g_ts[e][i] = g_ts_last[e][i] = start;
+            g_ts_used[e][i] = false;
+        }
+        g_ts_global[e] = start;
+    }
+}
+
+/* Timestamp of the next message from sender ep (each sender has its own clock). */
+static uint32_t msg_timestamp(int ep, const msg_spec_t *m)
+{
+    if (!m->present || m->not_channel_msg) {
+        return g_ts_global[ep];
+    }
+
+    uint8_t ch = m->ch & 0x3F;
+    if (!g_ts_used[ep][ch]) {
+        g_ts[ep][ch] = g_ts_global[ep];     /* a channel starts at the current time */
+        g_ts_used[ep][ch] = true;
+    }
+    if (m->replay) {
+        return g_ts_last[ep][ch];
+    }
+
+    g_ts[ep][ch] += (uint32_t)m->ts_jump;
+    uint32_t ts = g_ts[ep][ch];
+    g_ts_last[ep][ch] = ts;
+    if (m->chunk == IDN_CHUNK_WAVE) {
+        g_ts[ep][ch] += wave_duration(m);
+    }
+    if ((int32_t)(ts - g_ts_global[ep]) > 0) {
+        g_ts_global[ep] = ts;
+    }
+    return ts;
+}
+
 static bool run_scenario(const scenario_t *sc)
 {
     static idn_session_t s;
     static uint8_t buf[0x10000];
     const char *name = sc->name;
     bool failed = false;
+    idn_rt_outcome_t pending;
+    bool have_pending = false;
 
     memset(&g_fake, 0, sizeof(g_fake));
     g_fake.acquire_ok = true;
     g_fake.release_ok = true;
     g_fake.quiescent = true;
+    g_fake.limit_hz = 1000000;
     idn_session_init(&s, &k_ops);
+    timeline_reset(0x00010000u);
+    memset(g_seq, 0, sizeof(g_seq));
 
     int step_no = 0;
     for (const step_t *st = sc->steps; st->kind != EV_END; st++, step_no++) {
@@ -695,17 +914,23 @@ static bool run_scenario(const scenario_t *sc)
         idn_rt_outcome_t out;
         uint8_t resp[IDN_GROUP_RESP_BYTES] = { 0 };
         bool have_out = false;
+        uint16_t seq = 0;
+        if (st->kind == EV_RT || st->kind == EV_RT_RAW) {
+            /* Each sender counts its own RT packets. */
+            seq = st->seq ? (uint16_t)(st->seq - 1) : g_seq[st->ep];
+            g_seq[st->ep] = (uint16_t)(seq + 1u);
+        }
 
         switch (st->kind) {
             case EV_RT: {
-                size_t n = build_msg(&st->msg, buf);
-                idn_session_rt(&s, st->now, &k_ep[st->ep], st->cmd, st->group, (uint16_t)step_no,
+                size_t n = build_msg(&st->msg, msg_timestamp(st->ep, &st->msg), buf);
+                idn_session_rt(&s, st->now, &k_ep[st->ep], st->cmd, st->group, seq,
                                buf, n, &out);
                 have_out = true;
                 break;
             }
             case EV_RT_RAW:
-                idn_session_rt(&s, st->now, &k_ep[st->ep], st->cmd, st->group, (uint16_t)step_no,
+                idn_session_rt(&s, st->now, &k_ep[st->ep], st->cmd, st->group, seq,
                                st->raw, st->raw_len, &out);
                 have_out = true;
                 break;
@@ -732,9 +957,26 @@ static bool run_scenario(const scenario_t *sc)
                 if (st->set_acquire_ok) g_fake.acquire_ok = st->set_acquire_ok - 1;
                 if (st->set_release_ok) g_fake.release_ok = st->set_release_ok - 1;
                 if (st->set_quiescent)  g_fake.quiescent = st->set_quiescent - 1;
+                if (st->set_limit)      g_fake.limit_hz = (uint32_t)(st->set_limit - 1);
+                if (st->set_lock)       g_fake.lock_hz = (uint32_t)(st->set_lock - 1);
+                if (st->set_ts)         timeline_reset((uint32_t)(st->set_ts - 1));
+                if (st->flush_ack && have_pending) {
+                    idn_session_ack_sent(&s, &pending);
+                    have_pending = false;
+                }
                 continue;
             default:
                 break;
+        }
+
+        /* The ACK went out (the server confirms each successful send). */
+        if (have_out && out.send_ack) {
+            if (st->ack_lost) {
+                pending = out;
+                have_pending = true;
+            } else {
+                idn_session_ack_sent(&s, &out);
+            }
         }
 
         if (have_out && st->exp_result) {
@@ -768,6 +1010,16 @@ static bool run_scenario(const scenario_t *sc)
         if (st->exp_reason) {
             CHECK((int)g_fake.last_reason == st->exp_reason - 1, "release reason %d, want %d",
                   (int)g_fake.last_reason, st->exp_reason - 1);
+        }
+        if (st->exp_starts) {
+            CHECK(g_fake.epoch_starts - before.epoch_starts == st->exp_starts - 1,
+                  "epoch starts +%d, want +%d", g_fake.epoch_starts - before.epoch_starts,
+                  st->exp_starts - 1);
+        }
+        if (st->exp_breaks) {
+            CHECK(g_fake.epoch_breaks - before.epoch_breaks == st->exp_breaks - 1,
+                  "epoch breaks +%d, want +%d", g_fake.epoch_breaks - before.epoch_breaks,
+                  st->exp_breaks - 1);
         }
 
         CHECK(g_fake.compiles - before.compiles == st->d_compile, "compiles +%d, want +%d",
@@ -810,22 +1062,28 @@ static bool test_all_channel_ids(void)
 
     memset(&g_fake, 0, sizeof(g_fake));
     g_fake.acquire_ok = g_fake.release_ok = g_fake.quiescent = true;
+    g_fake.limit_hz = 1000000;
     idn_session_init(&s, &k_ops);
 
+    uint16_t seq = 0;
+    uint32_t ts = 0x00010000u;
     for (int ch = 0; ch < IDN_SESSION_CHANNELS; ch++, step_no++) {
         msg_spec_t open = M_ROUTE_WAVE(0, 0);
         msg_spec_t close = M_CLOSE_CH(0);
         open.ch = (uint8_t)ch;
         close.ch = (uint8_t)ch;
 
-        size_t n = build_msg(&open, buf);
-        idn_session_rt(&s, 0, &k_ep[EP_A], ACK, 0, 0, buf, n, &out);
+        size_t n = build_msg(&open, ts, buf);
+        idn_session_rt(&s, 0, &k_ep[EP_A], ACK, 0, seq++, buf, n, &out);
+        idn_session_ack_sent(&s, &out);
         CHECK(s.ch[ch].state == IDN_CHANNEL_ROUTED_ACTIVE, "channel %d not active", ch);
         CHECK(out.ack.pipeline_events == IDN_PEV_CNLRTED, "channel %d events 0x%04X", ch,
               out.ack.pipeline_events);
 
-        n = build_msg(&close, buf);
-        idn_session_rt(&s, 0, &k_ep[EP_A], ACK, 0, 0, buf, n, &out);
+        ts += wave_duration(&open);
+        n = build_msg(&close, ts, buf);
+        idn_session_rt(&s, 0, &k_ep[EP_A], ACK, 0, seq++, buf, n, &out);
+        idn_session_ack_sent(&s, &out);
         CHECK(s.ch[ch].state == IDN_CHANNEL_CLOSED, "channel %d not closed", ch);
     }
 
@@ -849,11 +1107,13 @@ static bool test_generations_advance(void)
 
     memset(&g_fake, 0, sizeof(g_fake));
     g_fake.acquire_ok = g_fake.release_ok = g_fake.quiescent = true;
+    g_fake.limit_hz = 1000000;
     idn_session_init(&s, &k_ops);
 
     uint32_t last = 0;
     for (int i = 0; i < 5; i++, step_no++) {
-        size_t n = build_msg(&open, buf);
+        /* Each abort ends the connection; the next one has a new sequence and timeline. */
+        size_t n = build_msg(&open, 0x00010000u, buf);
         idn_session_rt(&s, 0, &k_ep[EP_A], ACK, 0, 0, buf, n, &out);
         CHECK(g_fake.held_gen > last, "generation %u not after %u", g_fake.held_gen, last);
         last = g_fake.held_gen;

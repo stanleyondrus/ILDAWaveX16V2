@@ -6,13 +6,18 @@
  * Order for one RT packet:
  *   1. Bounds-check the message (no state touched on failure).
  *   2. Client group, abort, connection identity / allocation.
- *   3. Sequence hook (plan 03), then the link timeout is refreshed.
- *   4. Routing: resolve service/mode, take the exclusive route, build the
- *      decoder, store SDM. Repeated identical configuration changes nothing.
- *   5. Data: closed channel -> CCErr; SCM != SDM -> void the channel;
- *      checked chunk -> take the output on the first one, then enqueue.
- *   6. Channel Close, then connection close.
- *   7. ACK snapshot: latched events are reported once and cleared.
+ *   3. Sequence (idn_timing, plan 03): duplicate, late and stale packets
+ *      stop here; only then is the link timeout refreshed.
+ *   4. Message timestamp chronology (plan 03): an earlier one is dropped.
+ *   5. Routing: resolve service/mode, take the exclusive route, build the
+ *      decoder, store SDM. Repeated identical configuration changes nothing
+ *      except to end a broken wave epoch's wait for recovery.
+ *   6. Data: closed channel -> CCErr; SCM != SDM -> void the channel;
+ *      checked chunk -> continuity and rate (plan 03) -> take the output on
+ *      the first one, then enqueue.
+ *   7. Channel Close, then connection close.
+ *   8. ACK snapshot of the latched events; cleared by idn_session_ack_sent()
+ *      once the ACK has actually gone out.
  */
 
 #include <string.h>
@@ -133,6 +138,24 @@ static bool any_channel_open(const idn_session_t *s)
     return false;
 }
 
+static void pipeline_event(idn_channel_t *c, uint16_t bits)
+{
+    idn_event_latch_record(&c->pipeline, bits);
+}
+
+static void input_event(idn_session_t *s, uint16_t bits)
+{
+    idn_event_latch_record(&s->input, bits);
+}
+
+/* A new route generation starts a new timeline. */
+static void new_route_gen(idn_channel_t *c)
+{
+    c->route_gen++;
+    idn_wave_reset(&c->wave);
+    idn_rate_reset(&c->rate);
+}
+
 static bool output_fault_cleared(idn_session_t *s)
 {
     if (s->output_fault && s->ops.output_quiescent(s->ops.ctx)) {
@@ -154,9 +177,13 @@ static void release_output(idn_session_t *s, idn_stop_reason_t reason)
         s->fault_count++;
     }
 
-    if (s->laser_channel >= 0 &&
-        s->ch[s->laser_channel].state == IDN_CHANNEL_ROUTED_ACTIVE) {
-        s->ch[s->laser_channel].state = IDN_CHANNEL_ROUTED_IDLE;
+    if (s->laser_channel >= 0) {
+        idn_channel_t *c = &s->ch[s->laser_channel];
+        if (c->state == IDN_CHANNEL_ROUTED_ACTIVE) {
+            c->state = IDN_CHANNEL_ROUTED_IDLE;
+        }
+        /* The output run ended: its rate lock with it. */
+        idn_wave_end(&c->wave);
     }
 }
 
@@ -191,6 +218,7 @@ static void void_channel(idn_session_t *s, uint8_t ch, idn_void_reason_t why)
     c->route = IDN_ROUTE_NONE;
     c->void_reason = why;
     c->decoder_valid = false;
+    idn_wave_reset(&c->wave);
 }
 
 static void close_channel(idn_session_t *s, uint8_t ch, idn_stop_reason_t reason)
@@ -206,6 +234,8 @@ static void close_channel(idn_session_t *s, uint8_t ch, idn_stop_reason_t reason
     c->void_reason = IDN_VOID_NONE;
     c->decoder_valid = false;
     c->sdm = 0;
+    idn_wave_reset(&c->wave);
+    idn_rate_reset(&c->rate);
 }
 
 static void close_connection(idn_session_t *s, idn_stop_reason_t reason)
@@ -220,12 +250,14 @@ static void close_connection(idn_session_t *s, idn_stop_reason_t reason)
         if (s->ch[i].state != IDN_CHANNEL_CLOSED) {
             close_channel(s, (uint8_t)i, reason);
         }
-        s->ch[i].pipeline_events = 0;
+        idn_event_latch_reset(&s->ch[i].pipeline);
     }
 
     memset(&s->peer, 0, sizeof(s->peer));
     s->groups_seen = 0;
-    s->input_events = 0;
+    idn_event_latch_reset(&s->input);
+    idn_seq_reset(&s->seq);
+    idn_chronology_reset(&s->chrono);
 
     /* A producer that missed its stop deadline keeps the session unavailable. */
     s->state = s->output_fault ? IDN_SESSION_FAULTED : IDN_SESSION_FREE;
@@ -238,7 +270,10 @@ static void open_connection(idn_session_t *s, const idn_endpoint_t *from, int64_
     s->groups_seen = 0;
     s->last_rt_us = now_us;
     s->conn_gen++;
-    s->input_events = IDN_IEV_NEW;
+    idn_event_latch_reset(&s->input);
+    input_event(s, IDN_IEV_NEW);
+    idn_seq_reset(&s->seq);
+    idn_chronology_reset(&s->chrono);
 }
 
 static void route_channel(idn_session_t *s, const idn_msg_t *m)
@@ -259,8 +294,8 @@ static void route_channel(idn_session_t *s, const idn_msg_t *m)
     if (target == IDN_ROUTE_NONE) {
         /* Unknown service, or a mode this service does not implement. */
         void_channel(s, ch, IDN_VOID_INVALID_SERVICE);
-        c->route_gen++;
-        c->pipeline_events |= IDN_PEV_SMERR | IDN_PEV_CNLRTED;
+        new_route_gen(c);
+        pipeline_event(c, IDN_PEV_SMERR | IDN_PEV_CNLRTED);
         return;
     }
 
@@ -276,16 +311,16 @@ static void route_channel(idn_session_t *s, const idn_msg_t *m)
         c->void_reason = IDN_VOID_NONE;
         c->decoder_valid = false;
         c->sdm = m->sdm;
-        c->route_gen++;
-        c->pipeline_events |= IDN_PEV_CNLRTED;
+        new_route_gen(c);
+        pipeline_event(c, IDN_PEV_CNLRTED);
         return;
     }
 
     /* Continuous graphics is exclusive per service (Stream 3.2). */
     if (s->laser_channel >= 0 && s->laser_channel != ch) {
         void_channel(s, ch, IDN_VOID_BUSY);
-        c->route_gen++;
-        c->pipeline_events |= IDN_PEV_BSYERR | IDN_PEV_CNLRTED;
+        new_route_gen(c);
+        pipeline_event(c, IDN_PEV_BSYERR | IDN_PEV_CNLRTED);
         return;
     }
 
@@ -294,7 +329,10 @@ static void route_channel(idn_session_t *s, const idn_msg_t *m)
     if (same_route && c->decoder_valid && c->sdm == m->sdm &&
         s->laser_cfg_len == m->cfg_len &&
         (m->cfg_len == 0 || memcmp(s->laser_cfg, m->cfg, m->cfg_len) == 0)) {
-        return;     /* repeated configuration: not a change */
+        /* Repeated configuration: not a change, but a recovery boundary
+           for a channel waiting after a discontinuity (plan 03). */
+        idn_wave_recover(&c->wave);
+        return;
     }
 
     idn_cfg_result_t r = s->ops.config_compile(s->ops.ctx, ch, m->service_mode,
@@ -306,10 +344,10 @@ static void route_channel(idn_session_t *s, const idn_msg_t *m)
             s->ops.config_discard(s->ops.ctx, ch);
         }
         if (!same_route) {
-            c->route_gen++;
-            c->pipeline_events |= IDN_PEV_CNLRTED;
+            new_route_gen(c);
+            pipeline_event(c, IDN_PEV_CNLRTED);
         }
-        c->pipeline_events |= (r == IDN_CFG_NO_RESOURCES) ? IDN_PEV_IAPERR : IDN_PEV_CFGERR;
+        pipeline_event(c, (r == IDN_CFG_NO_RESOURCES) ? IDN_PEV_IAPERR : IDN_PEV_CFGERR);
         return;
     }
 
@@ -327,8 +365,10 @@ static void route_channel(idn_session_t *s, const idn_msg_t *m)
 
     if (!same_route) {
         c->state = IDN_CHANNEL_ROUTED_IDLE;
-        c->route_gen++;
-        c->pipeline_events |= IDN_PEV_CNLRTED;
+        new_route_gen(c);
+        pipeline_event(c, IDN_PEV_CNLRTED);
+    } else {
+        idn_wave_recover(&c->wave);
     }
 }
 
@@ -344,7 +384,27 @@ static uint16_t chunk_result_event(idn_chunk_result_t r)
     }
 }
 
-static void process_data(idn_session_t *s, const idn_msg_t *m)
+/*
+   End the channel's continuous epoch after a dropped chunk (plan 03). The
+   server blanks across it if this channel's output is held.
+*/
+static void wave_epoch_break(idn_session_t *s, uint8_t ch, bool await_recovery)
+{
+    idn_channel_t *c = &s->ch[ch];
+    bool live = c->wave.state == IDN_WAVE_CONTINUOUS;
+
+    if (await_recovery) {
+        idn_wave_break(&c->wave);
+    } else {
+        idn_wave_end(&c->wave);
+    }
+
+    if (live && s->output_held && s->laser_channel == ch && s->ops.wave_epoch) {
+        s->ops.wave_epoch(s->ops.ctx, ch, s->output_gen, false);
+    }
+}
+
+static void process_data(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
 {
     uint8_t ch = m->channel_id;
     idn_channel_t *c = &s->ch[ch];
@@ -354,13 +414,13 @@ static void process_data(idn_session_t *s, const idn_msg_t *m)
     }
 
     if (c->state == IDN_CHANNEL_CLOSED) {
-        s->input_events |= IDN_IEV_CCERR;   /* never auto-open */
+        input_event(s, IDN_IEV_CCERR);   /* never auto-open */
         return;
     }
 
     if (c->state == IDN_CHANNEL_VOIDED) {
         if (c->void_reason == IDN_VOID_CONFIG || c->void_reason == IDN_VOID_SCM_MISMATCH) {
-            c->pipeline_events |= IDN_PEV_CFGERR;   /* data with no decoder */
+            pipeline_event(c, IDN_PEV_CFGERR);   /* data with no decoder */
         }
         return;
     }
@@ -370,12 +430,13 @@ static void process_data(idn_session_t *s, const idn_msg_t *m)
     }
 
     if (m->chunk_type != IDN_CHUNK_WAVE) {
-        c->pipeline_events |= IDN_PEV_CKTERR;   /* continuous mode takes wave samples only */
+        pipeline_event(c, IDN_PEV_CKTERR);   /* continuous mode takes wave samples only */
+        s->counters.chunk_rejects++;
         return;
     }
 
     if (m->data_len < 4) {
-        c->pipeline_events |= IDN_PEV_MCLERR;
+        pipeline_event(c, IDN_PEV_MCLERR);
         return;
     }
 
@@ -383,40 +444,65 @@ static void process_data(idn_session_t *s, const idn_msg_t *m)
     if (scm != c->sdm) {
         /* Stream 6.7: discard the configuration, void, wait for a new one. */
         void_channel(s, ch, IDN_VOID_SCM_MISMATCH);
-        c->pipeline_events |= IDN_PEV_DCMERR;
+        pipeline_event(c, IDN_PEV_DCMERR);
         return;
     }
 
     if (!c->decoder_valid) {
-        c->pipeline_events |= IDN_PEV_CFGERR;
+        pipeline_event(c, IDN_PEV_CFGERR);
         return;
     }
 
-    idn_chunk_result_t r = s->ops.wave_check(s->ops.ctx, ch, m->data, m->data_len);
+    uint32_t nsamples = 0;
+    idn_chunk_result_t r = s->ops.wave_check(s->ops.ctx, ch, m->data, m->data_len, &nsamples);
     if (r != IDN_CHUNK_OK) {
-        c->pipeline_events |= chunk_result_event(r);
+        pipeline_event(c, chunk_result_event(r));
         return;
     }
 
-    if (s->ops.wave_timeline) {
-        uint16_t ev = 0;
-        bool keep = s->ops.wave_timeline(s->ops.ctx, ch, c->route_gen, m->timestamp,
-                                         m->data, m->data_len, &ev);
-        c->pipeline_events |= ev;
-        if (!keep) {
+    /* Stream 6.1: timestamp + duration must meet the next chunk exactly. */
+    uint32_t duration_us = ((uint32_t)m->data[1] << 16) |
+                           ((uint32_t)m->data[2] << 8) | (uint32_t)m->data[3];
+    idn_wave_verdict_t wv = idn_wave_check(&c->wave, ts_us);
+    if (idn_wave_verdict_is_error(wv)) {
+        pipeline_event(c, IDN_PEV_CTYERR);
+        s->counters.continuity_errors++;
+        if (wv != IDN_WAVE_AWAIT_RECOVERY) {
+            wave_epoch_break(s, ch, true);
+        }
+        return;
+    }
+
+    bool epoch_start = wv == IDN_WAVE_START || wv == IDN_WAVE_RESTART;
+    if (epoch_start) {
+        idn_rate_reset(&c->rate);
+    }
+
+    /* One stable rate per output run; never retime queued samples. */
+    if (s->ops.rate_limits) {
+        idn_rate_policy_t policy;
+        uint32_t locked = 0;
+        memset(&policy, 0, sizeof(policy));
+        s->ops.rate_limits(s->ops.ctx, s->output_held ? s->output_gen : 0, &policy, &locked);
+        if (idn_rate_check(&policy, &c->rate, nsamples, duration_us, locked) != IDN_RATE_OK) {
+            pipeline_event(c, IDN_PEV_RGUERR);
+            s->counters.rate_rejects++;
+            if (!epoch_start) {
+                wave_epoch_break(s, ch, true);
+            }
             return;
         }
     }
 
     if (!s->output_held) {
         if (!output_fault_cleared(s)) {
-            c->pipeline_events |= IDN_PEV_DVIERR;
+            pipeline_event(c, IDN_PEV_DVIERR);
             return;
         }
 
         uint32_t gen = s->output_gen + 1;
         if (!s->ops.output_acquire(s->ops.ctx, gen)) {
-            c->pipeline_events |= IDN_PEV_BSYERR;   /* another producer owns the laser */
+            pipeline_event(c, IDN_PEV_BSYERR);   /* another producer owns the laser */
             return;
         }
         s->output_gen = gen;
@@ -425,15 +511,28 @@ static void process_data(idn_session_t *s, const idn_msg_t *m)
 
     c->state = IDN_CHANNEL_ROUTED_ACTIVE;
 
+    if (epoch_start && s->ops.wave_epoch) {
+        s->ops.wave_epoch(s->ops.ctx, ch, s->output_gen, true);
+    }
+
     r = s->ops.wave_enqueue(s->ops.ctx, ch, s->output_gen, m->data, m->data_len);
-    c->pipeline_events |= chunk_result_event(r);
+    pipeline_event(c, chunk_result_event(r));
+
+    if (r == IDN_CHUNK_OK) {
+        idn_wave_commit(&c->wave, ts_us, duration_us);
+        idn_rate_commit(&c->rate, nsamples, duration_us);
+    } else if (c->wave.state == IDN_WAVE_CONTINUOUS) {
+        /* Not queued: the output has a hole here. Blank across it and let
+           the next chunk start a new epoch; no reconfiguration needed. */
+        wave_epoch_break(s, ch, false);
+    }
 }
 
 /* Returns the message's channel, or -1 when it is not a channel message. */
-static int process_message(idn_session_t *s, const idn_msg_t *m)
+static int process_message(idn_session_t *s, const idn_msg_t *m, uint64_t ts_us)
 {
     if (!m->channel_msg) {
-        s->input_events |= IDN_IEV_MVERR;
+        input_event(s, IDN_IEV_MVERR);
         return -1;
     }
 
@@ -446,12 +545,13 @@ static int process_message(idn_session_t *s, const idn_msg_t *m)
     if (m->chunk_type >= IDN_CHUNK_SEQUEL_MIN) {
         idn_channel_t *c = &s->ch[ch];
         if (c->state == IDN_CHANNEL_CLOSED) {
-            s->input_events |= IDN_IEV_CCERR;
+            input_event(s, IDN_IEV_CCERR);
         } else if (c->route == IDN_ROUTE_LASER_CONTINUOUS) {
-            c->pipeline_events |= IDN_PEV_CKTERR;
+            pipeline_event(c, IDN_PEV_CKTERR);
+            s->counters.chunk_rejects++;
         }
     } else {
-        process_data(s, m);
+        process_data(s, m, ts_us);
     }
 
     /* Close follows this message's data; the connection stays open. */
@@ -462,10 +562,66 @@ static int process_message(idn_session_t *s, const idn_msg_t *m)
     return ch;
 }
 
+/*
+   Session chronology (plan 03). Returns false when the message is earlier
+   than one already processed and is dropped (BPErr). Sequel fragments carry
+   a fragment number, not a timestamp, and are not checked.
+*/
+static bool message_in_order(idn_session_t *s, const idn_msg_t *m, uint64_t *ts_us)
+{
+    *ts_us = 0;
+    if (!m->channel_msg || !idn_chunk_has_timestamp(m->chunk_type)) {
+        return true;
+    }
+
+    if (idn_chronology_check(&s->chrono, m->timestamp, ts_us) != IDN_TS_BEFORE) {
+        idn_chronology_commit(&s->chrono, *ts_us);
+        return true;
+    }
+
+    if (idn_chronology_before(&s->chrono, m->timestamp, ts_us)) {
+        /* The sender restarted its clock: new timeline, new wave epochs. */
+        s->counters.ts_resyncs++;
+        for (int i = 0; i < IDN_SESSION_CHANNELS; i++) {
+            if (s->ch[i].wave.state != IDN_WAVE_IDLE) {
+                wave_epoch_break(s, (uint8_t)i, false);
+            }
+        }
+        return true;
+    }
+
+    input_event(s, IDN_IEV_BPERR);
+    s->counters.ts_before++;
+    return false;
+}
+
 static void plain_result(idn_rt_outcome_t *out, uint8_t result)
 {
     out->result = result;
     out->ack.result = result;
+}
+
+/* Fill the ACK from the latches; idn_session_ack_sent() clears them. */
+static void ack_snapshot(idn_session_t *s, idn_rt_outcome_t *out, int ch)
+{
+    out->latched = true;
+    out->conn_gen = s->conn_gen;
+    out->ack_channel = ch;
+    out->input_report = idn_event_latch_snapshot(&s->input);
+    out->ack.input_events = out->input_report.flags;
+    if (ch >= 0) {
+        out->pipeline_report = idn_event_latch_snapshot(&s->ch[ch].pipeline);
+    }
+}
+
+static void ack_finish(idn_session_t *s, idn_rt_outcome_t *out)
+{
+    int ch = out->ack_channel;
+    bool closed = ch >= 0 && s->ch[ch].state == IDN_CHANNEL_CLOSED;
+
+    out->ack.pipeline_events = idn_ack_pipeline_flags(out->pipeline_report.flags, ch >= 0, closed);
+    out->ack.status = (s->state == IDN_SESSION_ACTIVE && any_channel_open(s))
+                          ? IDN_STATUS_SOCNL : 0;
 }
 
 void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from,
@@ -474,6 +630,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
                     idn_rt_outcome_t *out)
 {
     memset(out, 0, sizeof(*out));
+    out->ack_channel = -1;
 
     bool ack_req  = cmd == IDN_CMD_RT_CHANNEL_ACK || cmd == IDN_CMD_RT_CLOSE_ACK;
     bool is_close = cmd == IDN_CMD_RT_CLOSE || cmd == IDN_CMD_RT_CLOSE_ACK;
@@ -491,6 +648,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
     idn_msg_t msg;
     bool has_msg = !is_abort && payload_len > 0;
     if (has_msg && !idn_session_parse_message(payload, payload_len, &msg)) {
+        s->counters.malformed++;
         /*
            A configuration cut short on the live connection still means its
            sender changed or lost the channel's configuration: nothing on that
@@ -501,7 +659,7 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
             endpoint_eq(&s->peer, from) && !idn_session_group_excluded(s, group) &&
             s->ch[msg.channel_id].state != IDN_CHANNEL_CLOSED) {
             void_channel(s, msg.channel_id, IDN_VOID_CONFIG);
-            s->ch[msg.channel_id].pipeline_events |= IDN_PEV_CFGERR;
+            pipeline_event(&s->ch[msg.channel_id], IDN_PEV_CFGERR);
         }
         plain_result(out, IDN_RESULT_INVALID);
         return;
@@ -537,37 +695,50 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
         out->connection_opened = true;
     }
 
-    if (s->ops.rt_input) {
-        uint16_t ev = 0;
-        bool keep = s->ops.rt_input(s->ops.ctx, s->conn_gen, seq, out->connection_opened, &ev);
-        s->input_events |= ev;
-        if (!keep) {
-            plain_result(out, IDN_RESULT_OK);
-            if (ack_req) {
-                out->ack.input_events = s->input_events;
-                s->input_events = 0;
-                out->ack.status = any_channel_open(s) ? IDN_STATUS_SOCNL : 0;
-            }
-            return;
+    int msg_ch = has_msg && msg.channel_msg ? msg.channel_id : -1;
+
+    /*
+       Plan 03 sequence policy. Duplicate, late and stale packets are not
+       processed and do not refresh the link. A duplicate is ACKed 0x00 (its
+       first copy was passed on); late and stale ones 0xEF.
+    */
+    idn_seq_result_t sr = idn_seq_observe(&s->seq, seq);
+    input_event(s, sr.input_events);
+    s->counters.seq_missing += sr.missing;
+    switch (sr.cls) {
+        case IDN_SEQ_DUPLICATE: s->counters.seq_duplicates++; break;
+        case IDN_SEQ_LATE:      s->counters.seq_late++;       break;
+        case IDN_SEQ_STALE:     s->counters.seq_stale++;      break;
+        case IDN_SEQ_RESYNC:    s->counters.seq_resyncs++;    break;
+        default: break;
+    }
+    if (!sr.accept) {
+        plain_result(out, sr.cls == IDN_SEQ_DUPLICATE ? IDN_RESULT_OK : IDN_RESULT_OTHER);
+        if (ack_req) {
+            ack_snapshot(s, out, msg_ch);
+            ack_finish(s, out);
         }
+        return;
     }
 
     s->groups_seen |= (uint16_t)(1u << group);
     s->last_rt_us = now_us;
     out->accepted = true;
+    s->counters.rt_accepted++;
 
-    int ack_ch = has_msg ? process_message(s, &msg) : -1;
+    int ack_ch = -1;
+    if (has_msg) {
+        uint64_t ts_us;
+        if (message_in_order(s, &msg, &ts_us)) {
+            ack_ch = process_message(s, &msg, ts_us);
+        } else {
+            ack_ch = msg_ch;
+        }
+    }
 
     /* Snapshot before a connection close resets the latches. */
-    uint16_t pev = 0;
-    uint16_t iev = 0;
     if (ack_req) {
-        if (ack_ch >= 0) {
-            pev = s->ch[ack_ch].pipeline_events;
-            s->ch[ack_ch].pipeline_events = 0;
-        }
-        iev = s->input_events;
-        s->input_events = 0;
+        ack_snapshot(s, out, ack_ch);
     }
 
     if (is_close) {
@@ -578,13 +749,21 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
     plain_result(out, IDN_RESULT_OK);
 
     if (ack_req) {
-        if (ack_ch >= 0 && s->ch[ack_ch].state == IDN_CHANNEL_CLOSED) {
-            pev |= IDN_PEV_CNLCLSD;
-        }
-        out->ack.input_events = iev;
-        out->ack.pipeline_events = pev;
-        out->ack.status = (s->state == IDN_SESSION_ACTIVE && any_channel_open(s))
-                              ? IDN_STATUS_SOCNL : 0;
+        ack_finish(s, out);
+    }
+}
+
+void idn_session_ack_sent(idn_session_t *s, const idn_rt_outcome_t *out)
+{
+    /* After a close the latches were reset; nothing of this ACK remains. */
+    if (!out->send_ack || !out->latched ||
+        s->state != IDN_SESSION_ACTIVE || s->conn_gen != out->conn_gen) {
+        return;
+    }
+
+    idn_event_latch_reported(&s->input, &out->input_report);
+    if (out->ack_channel >= 0) {
+        idn_event_latch_reported(&s->ch[out->ack_channel].pipeline, &out->pipeline_report);
     }
 }
 

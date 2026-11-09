@@ -61,6 +61,16 @@
  * RT traffic (IDN-Hello section 7.2). Close, abort, timeout, group exclusion
  * and a local Stop cancel the feed task and wait for it to acknowledge
  * before the ring is reset.
+ *
+ * -- Timing and diagnostics (idn_timing.c, inside idn_session) -----------------
+ * The session drops duplicate, late and stale RT packets (no link refresh)
+ * and messages with earlier timestamps (BPErr), and requires each channel's
+ * wave chunks to be exactly continuous (CTYErr). A discontinuity ends the
+ * epoch: this file blanks across it (wave_epoch). The output rate is applied
+ * once per output generation, just before START, from the samples queued;
+ * chunks at another rate are then rejected (RGUErr) instead of retiming the
+ * queue. ACK events are cleared only after the ACK was sent; latency and
+ * link quality are 0 (unknown).
  */
 
 #include <string.h>
@@ -84,6 +94,7 @@
 #include "idn_protocol.h"
 #include "idn_decoder.h"
 #include "idn_session.h"
+#include "idn_timing.h"
 #include "protocol_stream_stats.h"
 
 _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP channel counts differ");
@@ -92,7 +103,8 @@ _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP chann
 #define IDN_UDP_PORT            IDN_PROTOCOL_UDP_PORT
 #define IDN_RX_MAX              1500u           /* larger datagrams are dropped, never truncated */
 #define IDN_FEED_STOP_TIMEOUT_MS 1500u          /* feed exit includes the RP STOP round trip */
-#define IDN_RATE_HYSTERESIS     100u            /* pps */
+#define IDN_MIN_RATE_HZ         1000u           /* lowest wave rate accepted */
+#define IDN_EPOCH_BLANK_SAMPLES 16u             /* blanked hold on each side of a discontinuity */
 #define IDN_RING_CAPACITY       8192u           /* must be power of 2 */
 #define IDN_FEED_FLUSH_US       100000LL        /* send a partial packet only after the stream idles this long */
 #define IDN_FEED_PREBUFFER      3072u           /* samples queued on the RP before START (~100 ms at 30 kpps) */
@@ -150,17 +162,6 @@ typedef struct {
     uint8_t name[20];
 } idn_svcmap_entry_t;
 
-/* Acknowledge header: 12 bytes (IDNHDR_RT_ACKNOWLEDGE) */
-typedef struct {
-    uint8_t  struct_size;
-    uint8_t  result_code;
-    uint16_t input_event_flags;     /* big-endian */
-    uint16_t pipeline_event_flags;  /* big-endian */
-    uint8_t  status_flags;
-    uint8_t  link_quality;
-    uint32_t latency;               /* big-endian, uss */
-} idn_ack_hdr_t;
-
 #pragma pack(pop)
 
 /* -- Helpers: big-endian read/write ---------------------------------------- */
@@ -201,8 +202,6 @@ typedef struct {
 static rp_sample_t       *s_ring      = NULL;
 static volatile uint32_t  s_ring_head = 0;
 static volatile uint32_t  s_ring_tail = 0;
-static uint32_t           s_applied_rate = 0;     /* rate the RP runs */
-static uint32_t           s_requested_rate = 0;   /* rate the sender's chunks imply */
 
 static inline uint32_t ring_size(void)
 {
@@ -246,31 +245,62 @@ static void ring_clear(void) { s_ring_head = 0; s_ring_tail = 0; }
 
 static const char *TAG = "idn";
 
-static void apply_sample_rate(uint32_t rate)
+/*
+   Output rate (plan 03). The server task proposes the rate of the samples
+   queued for the current output generation; the feed applies it once, just
+   before START, and it stays locked for that generation. 0 = none.
+*/
+static volatile uint32_t s_proposed_rate = 0;
+static volatile uint32_t s_locked_rate   = 0;
+static uint32_t          s_rp_max_rate   = 0;   /* RP's own limit when the output was taken; 0 = none */
+
+/* Set once the feed has handed samples to the RP in this output run. No
+   completion point is known, so it stays set until the feed stops. */
+static volatile bool s_device_may_hold = false;
+
+/* Server task: last sample queued in this generation, for blanked holds. */
+static rp_sample_t s_last_queued;
+static bool        s_have_last_queued = false;
+static bool        s_lead_in_pending  = false;  /* next chunk starts a new epoch */
+
+static idn_protocol_counters_t s_counters;
+
+#define COUNT(field, n) __atomic_add_fetch(&s_counters.field, (uint32_t)(n), __ATOMIC_RELAXED)
+
+static idn_rate_policy_t rate_policy(void)
 {
-    if (rate < 1000 || rate > 100000) {
-        return;
+    idn_rate_policy_t p = {
+        .min_hz        = IDN_MIN_RATE_HZ,
+        .limit_hz      = rp_manager_get_rate_limit(),
+        .resolution_us = 1,
+    };
+    if (s_rp_max_rate != 0 && s_rp_max_rate < p.limit_hz) {
+        p.limit_hz = s_rp_max_rate;
     }
+    return p;
+}
 
-    /*
-       Compare with what was asked, not what the RP applied: a sender above
-       the scanner limit asks for the same rate in every chunk, and must not
-       cost a UART command per chunk.
-    */
-    uint32_t diff = s_requested_rate > rate ? s_requested_rate - rate : rate - s_requested_rate;
-    if (s_requested_rate != 0 && diff < IDN_RATE_HYSTERESIS) {
-        return;
-    }
-
+/*
+   Apply the proposed rate, then START. Never called at receive time: a
+   RATE command retimes every sample already queued on the RP.
+*/
+static bool feed_output_start(void)
+{
+    uint32_t rate = __atomic_load_n(&s_proposed_rate, __ATOMIC_ACQUIRE);
     uint32_t applied = rate;
-    if (rp_manager_set_rate_applied(rate, &applied) == ESP_OK) {
-        s_requested_rate = rate;
-        s_applied_rate = applied;
-        if (applied != rate) {
-            ESP_LOGW(TAG, "Sender rate %lu pps above scanner limit; running %lu, excess will be dropped",
-                     (unsigned long)rate, (unsigned long)applied);
-        }
+
+    if (rate == 0 || rp_manager_set_rate_applied(rate, &applied) != ESP_OK) {
+        return false;
     }
+    if (applied != rate) {
+        ESP_LOGW(TAG, "Asked %lu pps, RP runs %lu; chunks at %lu will be rejected",
+                 (unsigned long)rate, (unsigned long)applied, (unsigned long)rate);
+    }
+    __atomic_store_n(&s_locked_rate, applied, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_counters.selected_rate, applied, __ATOMIC_RELAXED);
+
+    rp_manager_output_start();
+    return true;
 }
 
 /* -- Module globals --------------------------------------------------------- */
@@ -365,8 +395,8 @@ static void feed_task(void *arg)
 
             if (avail == 0 || !idle) {
                 /* A stream that idles on a packet boundary has no tail to flush; start what is queued. */
-                if (avail == 0 && idle && !output_started && queued_before_start > 0 && !feed_cancelled()) {
-                    rp_manager_output_start();
+                if (avail == 0 && idle && !output_started && queued_before_start > 0 && !feed_cancelled() &&
+                    feed_output_start()) {
                     output_started = true;
                     ESP_LOGI(TAG, "IDN RP output started");
                 }
@@ -398,11 +428,12 @@ static void feed_task(void *arg)
         esp_err_t err = rp_manager_send_samples_packet(s_feed_packet);
         if (err == ESP_OK) {
             queued_before_start += got;
+            s_device_may_hold = true;
 
             /* Start once a short cushion is queued, or when a short stream is flushed. */
             if (!output_started && !feed_cancelled() &&
-                (queued_before_start >= IDN_FEED_PREBUFFER || got < (uint32_t)RP_STREAM_SAMPLES_PER_PACKET)) {
-                rp_manager_output_start();
+                (queued_before_start >= IDN_FEED_PREBUFFER || got < (uint32_t)RP_STREAM_SAMPLES_PER_PACKET) &&
+                feed_output_start()) {
                 output_started = true;
                 ESP_LOGI(TAG, "IDN RP output started");
             }
@@ -420,6 +451,7 @@ static void feed_task(void *arg)
         rp_manager_output_stop();
     else if (queued_before_start > 0)
         rp_manager_output_discard_unstarted();
+    s_device_may_hold = false;
     ESP_LOGI(TAG, "IDN feed task exiting");
 
     /* Last touch of shared state: the server may reset the ring after this. */
@@ -479,8 +511,11 @@ static bool feed_poll_stopped(void)
 static void output_reset(void)
 {
     ring_clear();
-    s_applied_rate = 0;
-    s_requested_rate = 0;
+    __atomic_store_n(&s_proposed_rate, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_locked_rate, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_counters.selected_rate, 0, __ATOMIC_RELAXED);
+    s_have_last_queued = false;
+    s_lead_in_pending = false;
 }
 
 /* -- Send helpers ----------------------------------------------------------- */
@@ -490,7 +525,7 @@ static void output_reset(void)
  * Uses a stack buffer for small payloads (management responses).
  * For large payloads (ping echo) we allocate on heap.
  */
-static void send_pkt(const struct sockaddr_in *dest,
+static bool send_pkt(const struct sockaddr_in *dest,
                      uint8_t cmd, uint8_t flags, uint16_t seq,
                      const void *payload, size_t payload_len)
 {
@@ -501,7 +536,7 @@ static void send_pkt(const struct sockaddr_in *dest,
 
     if (heap) {
         buf = malloc(total);
-        if (!buf) return;
+        if (!buf) return false;
     } else {
         buf = sbuf;
     }
@@ -512,34 +547,56 @@ static void send_pkt(const struct sockaddr_in *dest,
     if (payload && payload_len)
         memcpy(&buf[4], payload, payload_len);
 
-    sendto(s_sock, buf, total, 0,
-           (const struct sockaddr *)dest, sizeof(*dest));
+    int sent = sendto(s_sock, buf, total, 0,
+                      (const struct sockaddr *)dest, sizeof(*dest));
 
     if (heap) free(buf);
+    return sent == (int)total;
 }
 
+/*
+   Send the ACK the session built. The session sets SOCnl; SNMsg and DOBuf
+   come from the queues this file owns. DOBuf is conservative: no RP
+   completion point is known yet. Latency and link quality stay 0
+   (unknown). Latched events are cleared only once the ACK has gone out.
+*/
 static void send_ack(const struct sockaddr_in *dest,
-                     uint8_t flags, uint16_t seq, const idn_session_ack_t *a)
+                     uint8_t flags, uint16_t seq, const idn_rt_outcome_t *out)
 {
-    idn_ack_hdr_t ack;
-    memset(&ack, 0, sizeof(ack));
-    ack.struct_size = sizeof(ack);
-    ack.result_code = a->result;
-    wr16((uint8_t *)&ack.input_event_flags, a->input_events);
-    wr16((uint8_t *)&ack.pipeline_event_flags, a->pipeline_events);
-    ack.status_flags = a->status;
-    send_pkt(dest, IDNCMD_RT_ACK, flags, seq, &ack, sizeof(ack));
+    idn_ack_fields_t f;
+    memset(&f, 0, sizeof(f));
+    f.result_code          = out->ack.result;
+    f.input_event_flags    = out->ack.input_events;
+    f.pipeline_event_flags = out->ack.pipeline_events;
+    f.status_flags         = out->ack.status;
+    if (out->latched)
+        f.status_flags |= idn_ack_status_flags(false, ring_size() > 0, s_device_may_hold);
+
+    uint8_t ack[IDN_ACK_STRUCT_SIZE];
+    idn_ack_serialize(&f, ack);
+    if (send_pkt(dest, IDNCMD_RT_ACK, flags, seq, ack, sizeof(ack))) {
+        idn_session_ack_sent(&s_session, out);
+        COUNT(acks_sent, 1);
+    }
 }
 
 /* -- Discovery handlers ----------------------------------------------------- */
 static void handle_scan_req(const struct sockaddr_in *from,
                              uint8_t flags, uint16_t seq)
 {
+    /* One session: OCPD whenever it is held (or faulted), whoever asks. */
+    idn_scan_state_t st = {
+        .rt_supported    = true,
+        .sessions_total  = 1,
+        .sessions_in_use = idn_session_occupied(&s_session) ? 1u : 0u,
+        .group_excluded  = idn_session_group_excluded(&s_session, flags & 0x0F),
+    };
+
     idn_scan_resp_t r;
     memset(&r, 0, sizeof(r));
     r.struct_size       = sizeof(r);
     r.protocol_version  = 0x01;     /* IDN-Hello v1: major=0, minor=1 */
-    r.status            = 0x01;     /* bit0=RT supported */
+    r.status            = idn_scan_status(&st);
 
     /* Unit ID: EUI-48 from Ethernet MAC */
     r.unit_id[0] = 7;       /* 1 byte category + 6 bytes MAC */
@@ -575,10 +632,31 @@ static void handle_svcmap_req(const struct sockaddr_in *from,
 }
 
 /* -- Wave chunk processing -------------------------------------------------- */
+static uint32_t ring_write_blank(const rp_sample_t *at, uint32_t n)
+{
+    rp_sample_t blank[IDN_EPOCH_BLANK_SAMPLES];
+
+    if (n > IDN_EPOCH_BLANK_SAMPLES) n = IDN_EPOCH_BLANK_SAMPLES;
+    for (uint32_t i = 0; i < n; i++) {
+        for (int c = 0; c < RP_SAMPLE_CHANNELS; c++)
+            blank[i].ch[c] = -32768;    /* every optical line off (raw DAC 0) */
+        blank[i].ch[0] = at->ch[0];
+        blank[i].ch[1] = at->ch[1];
+    }
+
+    uint32_t w = ring_write(blank, n);
+    if (w > 0) {
+        s_last_queued = blank[w - 1];
+        COUNT(recovery_samples, w);
+    }
+    return w;
+}
+
 /*
    Decode a wave chunk the session has accepted for a routed channel. The
    whole chunk was validated by ops_wave_check() (header, duration, exact
-   stride, >= 20 samples); it is queued whole or not at all.
+   stride, >= 20 samples) and by the session's continuity and rate checks;
+   it is queued whole or not at all.
 */
 static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
                                              const uint8_t *data, uint16_t data_len)
@@ -594,18 +672,23 @@ static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
 
     const uint8_t *samples = data + IDN_DECODER_WAVE_HEADER_BYTES;
     uint8_t        stride  = ch->layout.stride;
-
-    /* Derive sample rate from the chunk duration field (24-bit BE uss). */
-    uint32_t rate = (uint32_t)((uint64_t)nsamples * 1000000ULL / duration_us);
-    apply_sample_rate(rate);
+    bool           lead_in = s_lead_in_pending && s_have_last_queued;
+    uint32_t       needed  = nsamples + (lead_in ? IDN_EPOCH_BLANK_SAMPLES : 0u);
 
     /* Queue the whole chunk or none of it; this task is the only producer. */
-    if (nsamples > ring_free()) {
+    if (needed > ring_free()) {
         protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples);
         return IDN_CHUNK_DEVICE_OVERRUN;
     }
 
     rp_sample_t burst[64];
+
+    /* A new epoch after earlier output: move there blanked first. */
+    if (lead_in) {
+        idn_decoder_decode(&ch->layout, samples, 1, &burst[0].ch);
+        ring_write_blank(&burst[0], IDN_EPOCH_BLANK_SAMPLES);
+    }
+    s_lead_in_pending = false;
 
     for (uint32_t s = 0; s < nsamples; ) {
         uint32_t n = nsamples - s;
@@ -615,6 +698,10 @@ static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
             idn_decoder_decode(&ch->layout, samples + (size_t)(s + j) * stride, 1, &burst[j].ch);
 
         uint32_t w = ring_write(burst, n);
+        if (w > 0) {
+            s_last_queued = burst[w - 1];
+            s_have_last_queued = true;
+        }
         if (w < n) {
             /* Ring full: the rest of this chunk is lost. Count it. */
             protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples - s - w);
@@ -622,6 +709,18 @@ static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
         }
         s += n;
     }
+    COUNT(queued_samples, nsamples);
+
+    /* Propose the epoch's rate including this chunk; the feed applies it
+       once before START. The session commits the same chunk after this. */
+    idn_rate_epoch_t epoch = s_session.ch[ch_id].rate;
+    idn_rate_policy_t policy = rate_policy();
+    idn_rate_commit(&epoch, nsamples, duration_us);
+    __atomic_store_n(&s_proposed_rate, idn_rate_select(&policy, &epoch), __ATOMIC_RELEASE);
+
+    uint64_t mhz = idn_rate_requested_mhz(&epoch);
+    __atomic_store_n(&s_counters.requested_rate_mhz,
+                     mhz > UINT32_MAX ? UINT32_MAX : (uint32_t)mhz, __ATOMIC_RELAXED);
 
     return IDN_CHUNK_OK;
 }
@@ -682,7 +781,8 @@ static void ops_config_discard(void *ctx, uint8_t ch_id)
 }
 
 static idn_chunk_result_t ops_wave_check(void *ctx, uint8_t ch_id,
-                                         const uint8_t *chunk, uint16_t chunk_len)
+                                         const uint8_t *chunk, uint16_t chunk_len,
+                                         uint32_t *samples)
 {
     (void)ctx;
 
@@ -691,6 +791,7 @@ static idn_chunk_result_t ops_wave_check(void *ctx, uint8_t ch_id,
     idn_decoder_result_t r = idn_decoder_check_wave_chunk(&ch->layout, chunk, chunk_len,
                                                           &nsamples, &duration_us);
     if (r.status == IDN_DECODER_OK) {
+        *samples = nsamples;
         return IDN_CHUNK_OK;
     }
 
@@ -724,7 +825,7 @@ static bool ops_output_acquire(void *ctx, uint32_t gen)
         return false;
     }
 
-    apply_sample_rate(30000);   /* safe default; overridden by wave chunk duration */
+    /* No rate is set here: the feed applies one before START (plan 03). */
     ESP_LOGI(TAG, "IDN output %lu acquired", (unsigned long)gen);
     return true;
 }
@@ -766,6 +867,41 @@ static bool ops_output_quiescent(void *ctx)
     return true;
 }
 
+static void ops_rate_limits(void *ctx, uint32_t gen, idn_rate_policy_t *policy,
+                            uint32_t *locked_hz)
+{
+    (void)ctx;
+
+    if (gen == 0) {
+        /* No output held: refresh the RP's own limit before a new run. */
+        rp_status_t rp;
+        rp_manager_get_status(&rp);
+        s_rp_max_rate = rp.remote_max_rate;
+    }
+
+    *policy = rate_policy();
+    *locked_hz = (gen != 0 && gen == s_output_gen)
+                     ? __atomic_load_n(&s_locked_rate, __ATOMIC_ACQUIRE) : 0;
+}
+
+/* A continuous epoch ends (blank hold at the last point) or starts (blanked
+   lead-in at its first point, if this output already queued samples). */
+static void ops_wave_epoch(void *ctx, uint8_t ch_id, uint32_t gen, bool start)
+{
+    (void)ctx;
+    (void)ch_id;
+
+    if (gen != s_output_gen || !s_feed_alive) {
+        return;
+    }
+    if (start) {
+        s_lead_in_pending = true;
+    } else if (s_have_last_queued) {
+        ESP_LOGW(TAG, "Channel %u discontinuity; blanked", ch_id);
+        ring_write_blank(&s_last_queued, IDN_EPOCH_BLANK_SAMPLES);
+    }
+}
+
 static const idn_session_ops_t s_session_ops = {
     .config_compile   = ops_config_compile,
     .config_discard   = ops_config_discard,
@@ -774,6 +910,8 @@ static const idn_session_ops_t s_session_ops = {
     .wave_enqueue     = ops_wave_enqueue,
     .output_release   = ops_output_release,
     .output_quiescent = ops_output_quiescent,
+    .rate_limits      = ops_rate_limits,
+    .wave_epoch       = ops_wave_epoch,
 };
 
 /* -- IDN-RT packet handler -------------------------------------------------- */
@@ -799,7 +937,7 @@ static void handle_rt_packet(const struct sockaddr_in *from,
         ESP_LOGI(TAG, "IDN session closed (%s)",
                  cmd == IDN_CMD_RT_ABORT ? "abort" : "close");
 
-    if (out.send_ack) send_ack(from, flags, seq, &out.ack);
+    if (out.send_ack) send_ack(from, flags, seq, &out);
 }
 
 static void handle_group_req(const struct sockaddr_in *from, uint8_t flags, uint16_t seq,
@@ -894,6 +1032,7 @@ static void server_task(void *arg)
         session_tick();
 
         if (n < 4) continue;    /* too short or EAGAIN from SO_RCVTIMEO */
+        COUNT(rx_datagrams, 1);
         if (n > (int)IDN_RX_MAX) {
             ESP_LOGD(TAG, "Datagram over %u bytes dropped", (unsigned)IDN_RX_MAX);
             continue;
@@ -941,6 +1080,35 @@ static void server_task(void *arg)
 }
 
 /* -- Public API ------------------------------------------------------------- */
+void idn_protocol_get_counters(idn_protocol_counters_t *out)
+{
+    if (!out) return;
+
+    /* Each field is a separate aligned 32-bit load; the session's counters
+       are written by the server task only. */
+    const idn_session_counters_t *sc = &s_session.counters;
+#define LOAD(p) __atomic_load_n(&(p), __ATOMIC_RELAXED)
+    out->rx_datagrams       = LOAD(s_counters.rx_datagrams);
+    out->rt_accepted        = LOAD(sc->rt_accepted);
+    out->malformed          = LOAD(sc->malformed);
+    out->seq_duplicates     = LOAD(sc->seq_duplicates);
+    out->seq_late           = LOAD(sc->seq_late);
+    out->seq_stale          = LOAD(sc->seq_stale);
+    out->seq_missing        = LOAD(sc->seq_missing);
+    out->seq_resyncs        = LOAD(sc->seq_resyncs);
+    out->ts_before          = LOAD(sc->ts_before);
+    out->ts_resyncs         = LOAD(sc->ts_resyncs);
+    out->continuity_errors  = LOAD(sc->continuity_errors);
+    out->rate_rejects       = LOAD(sc->rate_rejects);
+    out->chunk_rejects      = LOAD(sc->chunk_rejects);
+    out->queued_samples     = LOAD(s_counters.queued_samples);
+    out->recovery_samples   = LOAD(s_counters.recovery_samples);
+    out->requested_rate_mhz = LOAD(s_counters.requested_rate_mhz);
+    out->selected_rate      = LOAD(s_counters.selected_rate);
+    out->acks_sent          = LOAD(s_counters.acks_sent);
+#undef LOAD
+}
+
 esp_err_t idn_protocol_cancel_output(uint32_t timeout_ms)
 {
     if (!s_server_running) {

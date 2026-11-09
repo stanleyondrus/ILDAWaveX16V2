@@ -8,6 +8,7 @@ set(FIRMWARE_MAIN ${CMAKE_CURRENT_LIST_DIR}/../../../../firmware/ESP32S3/main)
 add_executable(test_idn_session
     test_session.c
     ${FIRMWARE_MAIN}/idn_session.c
+    ${FIRMWARE_MAIN}/idn_timing.c
 )
 
 target_include_directories(test_idn_session PRIVATE ${FIRMWARE_MAIN})

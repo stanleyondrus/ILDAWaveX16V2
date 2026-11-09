@@ -18,6 +18,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "idn_timing.h"
+
 #define IDN_SESSION_CHANNELS        64
 #define IDN_SESSION_LINK_TIMEOUT_US 1000000LL   /* Hello 7.2 default */
 #define IDN_SESSION_CFG_MAX_BYTES   (255u * 4u) /* SCWC is one octet of 32-bit words */
@@ -40,36 +42,40 @@
 #define IDN_MODE_VOID               0x00
 #define IDN_MODE_GRAPHIC_CONTINUOUS 0x01
 
-/* Acknowledge result codes (Hello 6.3.3) */
-#define IDN_RESULT_OK               0x00
-#define IDN_RESULT_EMPTY_CLOSE      0xEB
-#define IDN_RESULT_OCCUPIED         0xEC
-#define IDN_RESULT_EXCLUDED         0xED
-#define IDN_RESULT_INVALID          0xEE
+/* Acknowledge result codes and event/status flags (Hello 6.3.3): the
+   session's names for the values defined once in idn_timing.h. */
+#define IDN_RESULT_OK               IDN_ACK_RESULT_OK
+#define IDN_RESULT_EMPTY_CLOSE      IDN_ACK_RESULT_EMPTY_CLOSE
+#define IDN_RESULT_OCCUPIED         IDN_ACK_RESULT_OCCUPIED
+#define IDN_RESULT_EXCLUDED         IDN_ACK_RESULT_EXCLUDED
+#define IDN_RESULT_INVALID          IDN_ACK_RESULT_INVALID_PAYLOAD
+#define IDN_RESULT_OTHER            IDN_ACK_RESULT_OTHER_ERROR
 
-/* Input event flags (Hello 6.3.3) */
-#define IDN_IEV_NEW                 0x0001
-#define IDN_IEV_MVERR               0x0100
-#define IDN_IEV_CCERR               0x2000
-#define IDN_IEV_IRAERR              0x8000
+/* Input event flags */
+#define IDN_IEV_NEW                 IDN_INEV_NEW
+#define IDN_IEV_MVERR               IDN_INEV_MVERR
+#define IDN_IEV_BPERR               IDN_INEV_BPERR
+#define IDN_IEV_CCERR               IDN_INEV_CCERR
+#define IDN_IEV_IRAERR              IDN_INEV_IRAERR
 
-/* Pipeline event flags (Hello 6.3.3) */
-#define IDN_PEV_CNLRTED             0x0001
-#define IDN_PEV_CNLCLSD             0x0002  /* static: recomputed from state */
-#define IDN_PEV_SMERR               0x0010
-#define IDN_PEV_BSYERR              0x0020
-#define IDN_PEV_FRGERR              0x0040
-#define IDN_PEV_CFGERR              0x0080
-#define IDN_PEV_CKTERR              0x0100
-#define IDN_PEV_DCMERR              0x0200
-#define IDN_PEV_MCLERR              0x0800
-#define IDN_PEV_RGUERR              0x1000
-#define IDN_PEV_PVLERR              0x2000
-#define IDN_PEV_DVIERR              0x4000
-#define IDN_PEV_IAPERR              0x8000
+/* Pipeline event flags */
+#define IDN_PEV_CNLRTED             IDN_PLEV_CNLRTED
+#define IDN_PEV_CNLCLSD             IDN_PLEV_CNLCLSD    /* static: recomputed from state */
+#define IDN_PEV_SMERR               IDN_PLEV_SMERR
+#define IDN_PEV_BSYERR              IDN_PLEV_BSYERR
+#define IDN_PEV_FRGERR              IDN_PLEV_FRGERR
+#define IDN_PEV_CFGERR              IDN_PLEV_CFGERR
+#define IDN_PEV_CKTERR              IDN_PLEV_CKTERR
+#define IDN_PEV_DCMERR              IDN_PLEV_DCMERR
+#define IDN_PEV_CTYERR              IDN_PLEV_CTYERR
+#define IDN_PEV_MCLERR              IDN_PLEV_MCLERR
+#define IDN_PEV_RGUERR              IDN_PLEV_RGUERR
+#define IDN_PEV_PVLERR              IDN_PLEV_PVLERR
+#define IDN_PEV_DVIERR              IDN_PLEV_DVIERR
+#define IDN_PEV_IAPERR              IDN_PLEV_IAPERR
 
-/* Status flags (Hello 6.3.3) */
-#define IDN_STATUS_SOCNL            0x01
+/* Status flags: IDN_STATUS_SOCNL (set here), IDN_STATUS_SNMSG and
+   IDN_STATUS_DOBUF (added by the server, which owns the queues). */
 
 /* Client group response codes (Hello 3.2.2) */
 #define IDN_GROUP_OK                0x00
@@ -150,7 +156,7 @@ typedef enum {
 /*
    Output and decoder actions. Required: config_compile, wave_check,
    output_acquire, wave_enqueue, output_release, output_quiescent.
-   config_discard, rt_input and wave_timeline may be NULL.
+   config_discard, rate_limits and wave_epoch may be NULL.
 */
 typedef struct {
     void *ctx;
@@ -164,9 +170,10 @@ typedef struct {
     void (*config_discard)(void *ctx, uint8_t channel);
 
     /* Validate a wave chunk (header + samples) against the channel's decoder
-       without side effects. */
+       without side effects; *samples receives its sample count. */
     idn_chunk_result_t (*wave_check)(void *ctx, uint8_t channel,
-                                     const uint8_t *chunk, uint16_t chunk_len);
+                                     const uint8_t *chunk, uint16_t chunk_len,
+                                     uint32_t *samples);
 
     /* Take the physical output for generation gen. false: unavailable. */
     bool (*output_acquire)(void *ctx, uint32_t gen);
@@ -179,15 +186,15 @@ typedef struct {
     /* After a missed release deadline: has the producer stopped since? */
     bool (*output_quiescent)(void *ctx);
 
-    /* Plan 03 hooks. rt_input: sequence acceptance for an RT packet on the
-       connection; false drops it (no link refresh, no processing).
-       wave_timeline: chronology/continuity for a checked wave chunk; false
-       rejects it. Both may add event flags. */
-    bool (*rt_input)(void *ctx, uint32_t conn_gen, uint16_t seq, bool first,
-                     uint16_t *input_events);
-    bool (*wave_timeline)(void *ctx, uint8_t channel, uint32_t route_gen,
-                          uint32_t timestamp, const uint8_t *chunk,
-                          uint16_t chunk_len, uint16_t *pipeline_events);
+    /* Plan 03. rate_limits: the scanner rate policy, and the rate already
+       applied to output generation gen (0 = gen not held or none locked).
+       NULL: wave chunk rates are not checked. */
+    void (*rate_limits)(void *ctx, uint32_t gen, idn_rate_policy_t *policy,
+                        uint32_t *locked_hz);
+    /* Plan 03. A continuous epoch on the channel under output generation gen
+       starts with the next enqueue (start), or has just ended (!start): the
+       server blanks across the boundary. */
+    void (*wave_epoch)(void *ctx, uint8_t channel, uint32_t gen, bool start);
 } idn_session_ops_t;
 
 /* One parsed IDN-Stream channel message (pointers into the datagram). */
@@ -217,8 +224,26 @@ typedef struct {
     uint8_t             sdm;
     uint32_t            route_gen;
     uint32_t            config_gen;
-    uint16_t            pipeline_events;    /* latched since the last ACK */
+    idn_event_latch_t   pipeline;           /* pipeline events since the last sent ACK */
+    idn_wave_timeline_t wave;               /* plan 03: wave continuity */
+    idn_rate_epoch_t    rate;               /* plan 03: rate of the current epoch */
 } idn_channel_t;
+
+/* Plan 03 receiver counters, since boot; written by the session only. */
+typedef struct {
+    uint32_t rt_accepted;
+    uint32_t malformed;
+    uint32_t seq_duplicates;
+    uint32_t seq_late;
+    uint32_t seq_stale;
+    uint32_t seq_missing;
+    uint32_t seq_resyncs;
+    uint32_t ts_before;
+    uint32_t ts_resyncs;
+    uint32_t continuity_errors;
+    uint32_t rate_rejects;
+    uint32_t chunk_rejects;
+} idn_session_counters_t;
 
 typedef struct {
     idn_session_ops_t   ops;
@@ -232,7 +257,9 @@ typedef struct {
     uint16_t            groups_seen;        /* groups accepted on this connection */
     int64_t             last_rt_us;
     uint32_t            conn_gen;
-    uint16_t            input_events;       /* latched since the last ACK */
+    idn_event_latch_t   input;              /* input events since the last sent ACK */
+    idn_seq_tracker_t   seq;                /* plan 03: RT sequence of this connection */
+    idn_chronology_t    chrono;             /* plan 03: message timestamps */
 
     int                 laser_channel;      /* channel holding the continuous route, -1 none */
     uint16_t            laser_cfg_len;
@@ -242,6 +269,8 @@ typedef struct {
     bool                output_fault;       /* a release missed its deadline */
     uint32_t            output_gen;
     uint32_t            fault_count;
+
+    idn_session_counters_t counters;
 
     idn_channel_t       ch[IDN_SESSION_CHANNELS];
 } idn_session_t;
@@ -260,6 +289,13 @@ typedef struct {
     bool              connection_opened;
     bool              connection_closed;
     idn_session_ack_t ack;              /* valid if send_ack */
+
+    /* Latch snapshots behind ack, for idn_session_ack_sent(). */
+    bool               latched;
+    uint32_t           conn_gen;
+    int                ack_channel;     /* -1: no channel fields */
+    idn_event_report_t input_report;
+    idn_event_report_t pipeline_report;
 } idn_rt_outcome_t;
 
 void idn_session_init(idn_session_t *s, const idn_session_ops_t *ops);
@@ -277,6 +313,12 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
                     uint8_t cmd, uint8_t flags, uint16_t seq,
                     const uint8_t *payload, size_t payload_len,
                     idn_rt_outcome_t *out);
+
+/*
+   The ACK built from out was sent. Only now are the events it reported
+   cleared; an event latched since then, or a lost ACK, stays reported.
+*/
+void idn_session_ack_sent(idn_session_t *s, const idn_rt_outcome_t *out);
 
 /* Link timeout and fault recovery; call at least every 100 ms. */
 void idn_session_tick(idn_session_t *s, int64_t now_us);
