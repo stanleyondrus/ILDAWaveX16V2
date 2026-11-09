@@ -32,26 +32,22 @@
  *   Bytes 4..: sample array
  *
  * -- Tag dictionary ------------------------------------------------------------
- * Tags are 16-bit BE words structured as nibbles [CAT][SUB][ID][PRM].
- * Octet-descriptor tags (cat 4, 5) consume one sample byte each, in order.
- * Key tags we handle:
- *   0x4200  X coordinate (8-bit signed, left-aligned)
- *   0x4010  Precision - adds one low byte to the preceding coordinate tag
- *   0x4210  Y coordinate
- *   0x5NNN  Color (10-bit wavelength NNN in 4nm steps; mapped R/G/B by range)
- *   0x5C10  Intensity (blanking / legacy ISP signal)
- *   0x41xx  Hint (shutter / scale; byte consumed, otherwise ignored)
- *   0x000x  Void (skip x suffix words, no sample byte)
- *   0x1xxx  Modifier (no sample byte)
+ * Tags are 16-bit BE words structured as nibbles [CAT][SUB][ID][PRM]; they are
+ * compiled by idn_decoder.c, which documents the supported subset. In short:
+ * X/Y (0x4200/0x4210) with optional precision (0x4010), colours by wavelength
+ * in nm (0x527E = 638 nm), intensity 0x5C10 and hint format 0x4100 scales are
+ * decoded. Break, sample shutter (0x4101), wavelength prefixes and unknown
+ * category/subcategory combinations reject the configuration.
  *
- * ISP-DB25 default layout (used when no tag dict is supplied):
- *   X_hi X_lo Y_hi Y_lo R G B I  ->  8 bytes/sample, 16-bit X/Y, 8-bit colors
+ * There is no default layout: wave data is played only on a routed channel
+ * whose configuration compiled, and only as whole, exactly sized chunks of at
+ * least 20 samples.
  *
  * -- Sample conversion -> RP int16 ---------------------------------------------
- * RP channels: ch[0]=X, ch[1]=Y, ch[2]=R, ch[3]=G, ch[4]=B, ch[5]=I, 6-7=0
- * X/Y: 16-bit signed left-aligned (hi<<8|lo) -> already int16
- *       8-bit only: (int8_t)hi << 8  scales -128..127 -> -32768..32512
- * Colors: uint8 -> int16 via  (int16_t)(v * 256 - 32768)
+ * RP channels: ch[0]=X, ch[1]=Y, ch[2]=R, ch[3]=G, ch[4]=B, ch[5]=I, ch[6]=U1, ch[7]=U2
+ * X/Y: left-aligned signed 16 bit (8-bit values get zero low bits)
+ * Optical: left-aligned unsigned 16 bit, minus 32768; lines without a
+ *          descriptor stay at -32768 (raw DAC 0)
  *
  * -- Buffer & feed -------------------------------------------------------------
  * SPSC ring of decoded rp_sample_t structs (same design as etherdream_protocol).
@@ -81,7 +77,10 @@
 #include "app_config.h"
 #include "rp_manager.h"
 #include "idn_protocol.h"
+#include "idn_decoder.h"
 #include "protocol_stream_stats.h"
+
+_Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP channel counts differ");
 
 /* -- Tunables --------------------------------------------------------------- */
 #define IDN_UDP_PORT            IDN_PROTOCOL_UDP_PORT
@@ -91,7 +90,6 @@
 #define IDN_FEED_FLUSH_US       100000LL        /* send a partial packet only after the stream idles this long */
 #define IDN_FEED_PREBUFFER      3072u           /* samples queued on the RP before START (~100 ms at 30 kpps) */
 #define IDN_MAX_CHANNELS        64
-#define IDN_MAX_SAMPLE_OCTETS   32
 #define STACK_SERVER            8192u
 #define STACK_FEED              4096u
 
@@ -210,30 +208,12 @@ static inline void wr32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v);
 }
 
-/* -- Sample layout (built from tag dictionary) ------------------------------ */
-typedef enum {
-    ROLE_IGNORE = 0,
-    ROLE_X_HI,      /* high octet of X (signed, left-aligned) */
-    ROLE_X_LO,      /* precision (low) octet of X */
-    ROLE_Y_HI,
-    ROLE_Y_LO,
-    ROLE_R,
-    ROLE_G,
-    ROLE_B,
-    ROLE_I,         /* intensity / blanking */
-} octet_role_t;
-
-typedef struct {
-    bool         valid;
-    uint8_t      bps;                          /* bytes per sample */
-    octet_role_t role[IDN_MAX_SAMPLE_OCTETS];
-} sample_layout_t;
-
 /* -- Channel state ---------------------------------------------------------- */
 typedef struct {
-    bool            open;
-    uint8_t         service_mode;
-    sample_layout_t layout;
+    bool                 open;
+    uint8_t              service_mode;
+    idn_decoder_layout_t layout;        /* invalid until a configuration compiles */
+    idn_decoder_reason_t last_reject;   /* logged once per change */
 } idn_channel_t;
 
 /* -- SPSC ring buffer (decoded RP samples) --------------------------------- */
@@ -338,194 +318,17 @@ static TaskHandle_t  s_feed_task_h  = NULL;
 static int16_t     s_feed_packet[RP_STREAM_SAMPLES_PER_PACKET][RP_SAMPLE_CHANNELS];
 static rp_sample_t s_feed_stage[RP_STREAM_SAMPLES_PER_PACKET];
 
-/* -- Tag dictionary parser -------------------------------------------------- */
-static void install_default_layout(sample_layout_t *lay)
+/* -- Decoder ---------------------------------------------------------------- */
+static idn_decoder_caps_t s_decoder_caps;
+
+static void log_decoder_reject(uint8_t ch_id, idn_channel_t *ch, const char *what,
+                               idn_decoder_result_t r)
 {
-    memset(lay, 0, sizeof(*lay));
-    lay->valid   = true;
-    lay->bps     = 8;
-    lay->role[0] = ROLE_X_HI;
-    lay->role[1] = ROLE_X_LO;
-    lay->role[2] = ROLE_Y_HI;
-    lay->role[3] = ROLE_Y_LO;
-    lay->role[4] = ROLE_R;
-    lay->role[5] = ROLE_G;
-    lay->role[6] = ROLE_B;
-    lay->role[7] = ROLE_I;
-}
-
-/*
- * Parse a tag-dictionary byte array (SCWC x 4 bytes of 16-bit BE tag words)
- * into a sample_layout_t.  Returns false and installs default on failure.
- */
-static bool parse_tag_dict(const uint8_t *data, uint16_t len, sample_layout_t *lay)
-{
-    memset(lay, 0, sizeof(*lay));
-
-    uint16_t     pos              = 0;
-    uint8_t      oct              = 0;       /* current sample octet index */
-    octet_role_t prev_coord_role  = ROLE_IGNORE;
-    bool         has_r = false, has_g = false, has_b = false;
-
-    while (pos + 1 < len && oct < IDN_MAX_SAMPLE_OCTETS) {
-        uint16_t tag = rd16(data + pos);
-        pos += 2;
-
-        uint8_t cat = (tag >> 12) & 0xF;
-        uint8_t sub = (tag >>  8) & 0xF;
-        uint8_t id  = (tag >>  4) & 0xF;
-        uint8_t prm = (tag >>  0) & 0xF;
-
-        /* Category 0: void / struct modifier */
-        if (cat == 0) {
-            /* Void tag: skip prm suffix words, no sample octet */
-            pos += (uint16_t)(prm * 2);
-            prev_coord_role = ROLE_IGNORE;
-            continue;
-        }
-
-        /* Category 1: modifier with parameter (Break, Space) */
-        if (cat == 1) {
-            prev_coord_role = ROLE_IGNORE;
-            continue;
-        }
-
-        /* Category 4 sub 0: NOP or Precision */
-        if (cat == 4 && sub == 0) {
-            if (id == 0 && prm == 0) {
-                /* NOP: consumes one sample octet, ignored */
-                lay->role[oct++] = ROLE_IGNORE;
-                prev_coord_role  = ROLE_IGNORE;
-            } else if (id == 1 && prm == 0) {
-                /* Precision: low byte for previous coordinate */
-                octet_role_t lo = ROLE_IGNORE;
-                if      (prev_coord_role == ROLE_X_HI) lo = ROLE_X_LO;
-                else if (prev_coord_role == ROLE_Y_HI) lo = ROLE_Y_LO;
-                lay->role[oct++] = lo;
-                /* don't reset prev_coord_role - multiple precision tags allowed */
-            }
-            continue;
-        }
-
-        /* Category 4 sub 1: Hint - consumes one sample octet */
-        if (cat == 4 && sub == 1) {
-            lay->role[oct++] = ROLE_IGNORE;   /* shutter/scale byte, we ignore */
-            prev_coord_role  = ROLE_IGNORE;
-            continue;
-        }
-
-        /* Category 4 sub 2: X / Y / Z coordinate */
-        if (cat == 4 && sub == 2) {
-            octet_role_t role = ROLE_IGNORE;
-            if      (id == 0 && prm == 0) { role = ROLE_X_HI; prev_coord_role = ROLE_X_HI; }
-            else if (id == 1 && prm == 0) { role = ROLE_Y_HI; prev_coord_role = ROLE_Y_HI; }
-            else                          { prev_coord_role = ROLE_IGNORE; }
-            lay->role[oct++] = role;
-            continue;
-        }
-
-        /* Category 5 sub 0-3: color by wavelength.
-         * The 10-bit field encodes wavelength in 4 nm steps, so
-         *   wl_nm = wl * 4   (e.g. wl=160 -> 640 nm red, wl=133 -> 532 nm green).
-         * Thresholds below are therefore in nm/4 units, not raw nm. */
-        if (cat == 5 && sub <= 3) {
-            uint16_t wl = (uint16_t)(((sub & 3u) << 8) | (id << 4) | prm);
-            octet_role_t role;
-            if      (wl >= 145 && wl <= 195) { role = ROLE_R; has_r = true; }
-            else if (wl >= 122 && wl <  145) { role = ROLE_G; has_g = true; }
-            else if (wl >=  95 && wl <  122) { role = ROLE_B; has_b = true; }
-            else if (!has_r)                 { role = ROLE_R; has_r = true; }
-            else if (!has_g)                 { role = ROLE_G; has_g = true; }
-            else if (!has_b)                 { role = ROLE_B; has_b = true; }
-            else                               role = ROLE_IGNORE;
-            lay->role[oct++] = role;
-            prev_coord_role  = ROLE_IGNORE;
-            continue;
-        }
-
-        /* Category 5 sub 12 (0xC): Intensity (0x5C10), Beam-Brush, Wavelen Prefix */
-        if (cat == 5 && sub == 0xC) {
-            octet_role_t role = ROLE_IGNORE;
-            if (id == 1 && prm == 0) role = ROLE_I;   /* 0x5C10 = Intensity */
-            lay->role[oct++] = role;
-            prev_coord_role  = ROLE_IGNORE;
-            continue;
-        }
-
-        /* All other categories: unknown, no sample octet consumed */
-        prev_coord_role = ROLE_IGNORE;
-    }
-
-    lay->bps = oct;
-
-    /* Validate: need at least X, Y, and one color */
-    bool has_x = false, has_y = false, has_color = false;
-    for (uint8_t j = 0; j < oct; j++) {
-        switch (lay->role[j]) {
-            case ROLE_X_HI:  has_x     = true; break;
-            case ROLE_Y_HI:  has_y     = true; break;
-            case ROLE_R: case ROLE_G:
-            case ROLE_B: case ROLE_I:
-                has_color = true; break;
-            default: break;
-        }
-    }
-
-    if (!has_x || !has_y || !has_color) {
-        ESP_LOGW(TAG, "Tag dict unusable (x=%d y=%d color=%d bps=%d) -> default",
-                 has_x, has_y, has_color, oct);
-        install_default_layout(lay);
-        return false;
-    }
-
-    lay->valid = true;
-    ESP_LOGD(TAG, "Tag dict: %u bytes/sample", oct);
-    return true;
-}
-
-/* -- Sample decode ---------------------------------------------------------- */
-static inline void decode_sample(const uint8_t *oct, const sample_layout_t *lay,
-                                  rp_sample_t *out)
-{
-    int8_t  x_hi = 0;  uint8_t x_lo = 0;  bool have_xlo = false;
-    int8_t  y_hi = 0;  uint8_t y_lo = 0;  bool have_ylo = false;
-    uint8_t r = 0, g = 0, b = 0, intens = 0;
-
-    for (uint8_t j = 0; j < lay->bps; j++) {
-        uint8_t v = oct[j];
-        switch (lay->role[j]) {
-            case ROLE_X_HI:  x_hi = (int8_t)v;   break;
-            case ROLE_X_LO:  x_lo = v; have_xlo = true; break;
-            case ROLE_Y_HI:  y_hi = (int8_t)v;   break;
-            case ROLE_Y_LO:  y_lo = v; have_ylo = true; break;
-            case ROLE_R:     r      = v; break;
-            case ROLE_G:     g      = v; break;
-            case ROLE_B:     b      = v; break;
-            case ROLE_I:     intens = v; break;
-            default: break;
-        }
-    }
-
-    /* X/Y: 16-bit if precision present, else 8-bit scaled */
-    int16_t x = have_xlo ? (int16_t)(((int16_t)x_hi << 8) | x_lo)
-                          : (int16_t)(x_hi << 8);
-    int16_t y = have_ylo ? (int16_t)(((int16_t)y_hi << 8) | y_lo)
-                          : (int16_t)(y_hi << 8);
-
-    /* Derive intensity from colour when sender omits ROLE_I */
-    if (intens == 0 && (r | g | b)) {
-        intens = (r >= g && r >= b) ? r : (g >= b ? g : b);
-    }
-
-    /* Colors: uint8 -> int16  (0 -> -32768, 255 -> +32512) */
-    out->ch[0] = x;
-    out->ch[1] = y;
-    out->ch[2] = (int16_t)((int32_t)r      * 256 - 32768);
-    out->ch[3] = (int16_t)((int32_t)g      * 256 - 32768);
-    out->ch[4] = (int16_t)((int32_t)b      * 256 - 32768);
-    out->ch[5] = (int16_t)((int32_t)intens * 256 - 32768);
-    out->ch[6] = 0;
-    out->ch[7] = 0;
+    if (ch->last_reject == r.reason) return;
+    ch->last_reject = r.reason;
+    ESP_LOGW(TAG, "Channel %u %s rejected: %s (%s), tag 0x%04X at word %u",
+             ch_id, what, idn_decoder_status_name(r.status), idn_decoder_reason_name(r.reason),
+             r.tag, r.tag_index);
 }
 
 /* -- Feed task -------------------------------------------------------------- */
@@ -823,10 +626,15 @@ static void process_channel_config(uint8_t ch_id,
         ch->open         = true;
         ch->service_mode = cfg->service_mode;
 
-        if (cfg->scwc > 0 && svc_bytes >= 2) {
-            parse_tag_dict(svc_data, svc_bytes, &ch->layout);
-        } else if (!ch->layout.valid) {
-            install_default_layout(&ch->layout);
+        /* Every routing configuration is compiled; a rejected one leaves the channel without a decoder. */
+        idn_decoder_result_t r = idn_decoder_compile(svc_data, svc_bytes, &s_decoder_caps, &ch->layout);
+        if (r.status == IDN_DECODER_OK) {
+            if (ch->last_reject != IDN_DECODER_REASON_NONE)
+                ESP_LOGI(TAG, "Channel %u configuration accepted", ch_id);
+            ch->last_reject = IDN_DECODER_REASON_NONE;
+            ESP_LOGD(TAG, "Tag dict: %u bytes/sample", ch->layout.stride);
+        } else {
+            log_decoder_reject(ch_id, ch, "configuration", r);
         }
     }
 }
@@ -838,34 +646,32 @@ static void process_wave_chunk(uint8_t ch_id,
     if (ch_id >= IDN_MAX_CHANNELS) return;
     idn_channel_t *ch = &s_channels[ch_id];
 
-    /* Auto-open with default layout if client sends data without routing */
-    if (!ch->open) {
-        ch->open = true;
-        if (!ch->layout.valid)
-            install_default_layout(&ch->layout);
-        ESP_LOGD(TAG, "Channel %u auto-opened", ch_id);
+    /* No auto-open and no default layout: data needs a routed channel whose configuration compiled. */
+    if (!ch->open || !ch->layout.valid) {
+        ESP_LOGD(TAG, "Wave chunk on channel %u without accepted configuration dropped", ch_id);
+        return;
     }
 
-    if (data_len < 4) return;   /* need chunk header */
+    /* Whole chunk is validated (header, duration, exact stride, >= 20 samples) before decoding. */
+    uint32_t nsamples = 0, duration_us = 0;
+    idn_decoder_result_t r = idn_decoder_check_wave_chunk(&ch->layout, data, data_len,
+                                                          &nsamples, &duration_us);
+    if (r.status != IDN_DECODER_OK) {
+        log_decoder_reject(ch_id, ch, "wave chunk", r);
+        return;
+    }
 
-    /* Wave chunk header: flags(1) + duration uss (3 bytes BE) */
-    const uint8_t *samples = data + 4;
-    uint16_t       slen    = data_len - 4;
-    uint8_t        bps     = ch->layout.bps;
+    const uint8_t *samples = data + IDN_DECODER_WAVE_HEADER_BYTES;
+    uint8_t        stride  = ch->layout.stride;
 
-    if (bps == 0 || slen < bps) return;
+    /* Derive sample rate from the chunk duration field (24-bit BE uss). */
+    uint32_t rate = (uint32_t)((uint64_t)nsamples * 1000000ULL / duration_us);
+    apply_sample_rate(rate);
 
-    uint32_t nsamples = slen / bps;
-
-    /* Derive sample rate from the chunk duration field (24-bit BE uss).
-     * Only update when both fields are non-zero to avoid divide-by-zero
-     * and to ignore keepalive/config-only chunks. */
-    uint32_t duration_us = ((uint32_t)data[1] << 16) |
-                           ((uint32_t)data[2] <<  8) |
-                            (uint32_t)data[3];
-    if (duration_us > 0 && nsamples > 0) {
-        uint32_t rate = (uint32_t)((uint64_t)nsamples * 1000000ULL / duration_us);
-        apply_sample_rate(rate);
+    /* Queue the whole chunk or none of it; this task is the only producer. */
+    if (nsamples > ring_free()) {
+        protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples);
+        return;
     }
 
     rp_sample_t burst[64];
@@ -876,7 +682,7 @@ static void process_wave_chunk(uint8_t ch_id,
         if (n > 64) n = 64;
 
         for (uint32_t j = 0; j < n; j++)
-            decode_sample(samples + (s + j) * bps, &ch->layout, &burst[j]);
+            idn_decoder_decode(&ch->layout, samples + (size_t)(s + j) * stride, 1, &burst[j].ch);
 
         uint32_t w = ring_write(burst, n);
         written += w;
@@ -960,7 +766,13 @@ static void handle_rt_packet(const struct sockaddr_in *from,
         cursor_len -= (uint16_t)sizeof(idn_chan_cfg_hdr_t);
 
         uint16_t svc_bytes = (uint16_t)cfg->scwc * 4;
-        if (svc_bytes > cursor_len) svc_bytes = cursor_len;
+        if (svc_bytes > cursor_len) {
+            /* Never shorten the declared configuration to fit; nothing on this channel decodes until a whole one arrives. */
+            if (ch_id < IDN_MAX_CHANNELS)
+                s_channels[ch_id].layout.valid = false;
+            if (need_ack) send_ack(from, flags, seq, IDNACK_INVALID);
+            return;
+        }
 
         process_channel_config(ch_id, cfg, cursor, svc_bytes);
 
@@ -1115,6 +927,7 @@ esp_err_t idn_protocol_start(void)
              (unsigned)(IDN_RING_CAPACITY * sizeof(rp_sample_t)));
 
     memset(s_channels, 0, sizeof(s_channels));
+    idn_decoder_default_caps(&s_decoder_caps);
 
     BaseType_t ok = xTaskCreatePinnedToCore(
         server_task, "idn_server", STACK_SERVER, NULL, 5, NULL, 0);
