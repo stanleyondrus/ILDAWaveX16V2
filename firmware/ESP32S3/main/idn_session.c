@@ -97,6 +97,7 @@ bool idn_session_parse_message(const uint8_t *p, size_t len, idn_msg_t *m)
         if (m->routing) {
             size_t cfg_bytes = (size_t)scwc * 4u;
             if (len - pos < cfg_bytes) {
+                m->cfg_truncated = true;
                 return false;
             }
             m->cfg = p + pos;
@@ -490,6 +491,18 @@ void idn_session_rt(idn_session_t *s, int64_t now_us, const idn_endpoint_t *from
     idn_msg_t msg;
     bool has_msg = !is_abort && payload_len > 0;
     if (has_msg && !idn_session_parse_message(payload, payload_len, &msg)) {
+        /*
+           A configuration cut short on the live connection still means its
+           sender changed or lost the channel's configuration: nothing on that
+           channel decodes until a whole one arrives. The packet stays
+           malformed: no link refresh, no other processing.
+        */
+        if (msg.cfg_truncated && s->state == IDN_SESSION_ACTIVE &&
+            endpoint_eq(&s->peer, from) && !idn_session_group_excluded(s, group) &&
+            s->ch[msg.channel_id].state != IDN_CHANNEL_CLOSED) {
+            void_channel(s, msg.channel_id, IDN_VOID_CONFIG);
+            s->ch[msg.channel_id].pipeline_events |= IDN_PEV_CFGERR;
+        }
         plain_result(out, IDN_RESULT_INVALID);
         return;
     }

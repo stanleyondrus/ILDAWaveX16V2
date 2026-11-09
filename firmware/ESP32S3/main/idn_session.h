@@ -156,7 +156,8 @@ typedef struct {
     void *ctx;
 
     /* Build a decoder for channel from the service configuration bytes.
-       Must not change the channel's active decoder unless it returns OK. */
+       On failure the channel's decoder may be left invalid (never a
+       fallback); the session voids the channel either way. */
     idn_cfg_result_t (*config_compile)(void *ctx, uint8_t channel, uint8_t mode,
                                        const uint8_t *cfg, uint16_t cfg_len);
     /* The channel's decoder is void; drop it. */
@@ -205,6 +206,7 @@ typedef struct {
     uint16_t       cfg_len;
     const uint8_t *data;
     uint16_t       data_len;
+    bool           cfg_truncated;   /* parse failed: SCWC region cut short */
 } idn_msg_t;
 
 typedef struct {
@@ -265,7 +267,8 @@ void idn_session_init(idn_session_t *s, const idn_session_ops_t *ops);
 /*
    Bounds-check one channel message. Requires total size == len (0x0008..
    0xFF00), a complete configuration header and SCWC region, SCWC 0 when
-   Routing is clear, and no data after a Void chunk. Never clamps.
+   Routing is clear, and no data after a Void chunk. Never clamps. When the
+   SCWC region is cut short, cfg_truncated and channel_id are still set.
 */
 bool idn_session_parse_message(const uint8_t *p, size_t len, idn_msg_t *m);
 

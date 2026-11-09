@@ -54,9 +54,13 @@
  * Feed task (core 1, priority 6) drains ring -> RP2350 with galvo-hold padding.
  *
  * -- Session / link ------------------------------------------------------------
- * One UDP address:port session at a time.
- * Link times out after 1 second of no packets (IDN-Hello spec section7.2).
- * On timeout or graceful close: feed stops, ring clears, channels reset.
+ * idn_session.c owns connection, channel and route state. One session,
+ * identified by client address and port. A channel plays only after Routing
+ * with a configuration the decoder accepts; data on a closed channel is
+ * refused (no auto-open). The link times out after 1 second without accepted
+ * RT traffic (IDN-Hello section 7.2). Close, abort, timeout, group exclusion
+ * and a local Stop cancel the feed task and wait for it to acknowledge
+ * before the ring is reset.
  */
 
 #include <string.h>
@@ -65,6 +69,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -78,13 +83,15 @@
 #include "rp_manager.h"
 #include "idn_protocol.h"
 #include "idn_decoder.h"
+#include "idn_session.h"
 #include "protocol_stream_stats.h"
 
 _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP channel counts differ");
 
 /* -- Tunables --------------------------------------------------------------- */
 #define IDN_UDP_PORT            IDN_PROTOCOL_UDP_PORT
-#define IDN_LINK_TIMEOUT_US     6000000LL       /* tolerate short sender/UI stalls */
+#define IDN_RX_MAX              1500u           /* larger datagrams are dropped, never truncated */
+#define IDN_FEED_STOP_TIMEOUT_MS 1500u          /* feed exit includes the RP STOP round trip */
 #define IDN_RATE_HYSTERESIS     100u            /* pps */
 #define IDN_RING_CAPACITY       8192u           /* must be power of 2 */
 #define IDN_FEED_FLUSH_US       100000LL        /* send a partial packet only after the stream idles this long */
@@ -108,45 +115,13 @@ _Static_assert(IDN_DECODER_CHANNELS == RP_SAMPLE_CHANNELS, "decoder and RP chann
 #define IDNCMD_SCAN_RESP        0x11
 #define IDNCMD_SVCMAP_REQ       0x12
 #define IDNCMD_SVCMAP_RESP      0x13
-#define IDNCMD_RT_CHANNEL       0x40
-#define IDNCMD_RT_CHANNEL_ACK   0x41
-#define IDNCMD_RT_CLOSE         0x44
-#define IDNCMD_RT_CLOSE_ACK     0x45
 #define IDNCMD_RT_ACK           0x47
-
-/* -- IDN-Stream chunk types ------------------------------------------------- */
-#define CHUNK_VOID              0x00
-#define CHUNK_WAVE              0x01
-#define CHUNK_FRAME_FULL        0x02
-#define CHUNK_FRAME_FIRST       0x03
-#define CHUNK_FRAGMENT_MIN      0xC0
 
 /* -- IDN service types ------------------------------------------------------ */
 #define IDNSVC_LASER            0x80
 
-/* -- ACK result codes ------------------------------------------------------- */
-#define IDNACK_OK               0x00
-#define IDNACK_OCCUPIED         0xEC
-#define IDNACK_INVALID          0xEE
-
 /* -- Packed wire structures ------------------------------------------------- */
 #pragma pack(push, 1)
-
-/* IDN-Stream channel message header: 8 bytes */
-typedef struct {
-    uint16_t total_size;    /* big-endian */
-    uint8_t  cnl;           /* CHANNELMSG(bit7,always1) | CONFIG_FLAG/CCLF(bit6) | channel_id(bits5-0) */
-    uint8_t  chunk_type;
-    uint32_t timestamp;     /* big-endian, uss */
-} idn_stream_hdr_t;
-
-/* Channel configuration header: 4 bytes */
-typedef struct {
-    uint8_t scwc;           /* service config word count (words x 4 = bytes) */
-    uint8_t cfl;            /* bit0=Routing, bit1=Close */
-    uint8_t service_id;
-    uint8_t service_mode;
-} idn_chan_cfg_hdr_t;
 
 /* Scan response: 40 bytes (IDNHDR_SCAN_RESPONSE) */
 typedef struct {
@@ -208,13 +183,15 @@ static inline void wr32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v);
 }
 
-/* -- Channel state ---------------------------------------------------------- */
+/* -- Channel decoders (route and channel state live in idn_session) --------- */
 typedef struct {
-    bool                 open;
-    uint8_t              service_mode;
     idn_decoder_layout_t layout;        /* invalid until a configuration compiles */
     idn_decoder_reason_t last_reject;   /* logged once per change */
-} idn_channel_t;
+} idn_channel_decoder_t;
+
+_Static_assert(IDN_MAX_CHANNELS == IDN_SESSION_CHANNELS, "decoder and session channel counts differ");
+
+static idn_channel_decoder_t s_decoders[IDN_MAX_CHANNELS];
 
 /* -- SPSC ring buffer (decoded RP samples) --------------------------------- */
 typedef struct {
@@ -301,18 +278,24 @@ static void apply_sample_rate(uint32_t rate)
 static uint8_t s_mac[6];
 static int     s_sock = -1;
 
-/* Session */
-static struct sockaddr_in s_client_addr;
-static bool               s_client_active = false;
-static int64_t            s_link_last_us  = 0;
+/* Session: touched only by the server task */
+static idn_session_t s_session;
 
-/* Channels */
-static idn_channel_t s_channels[IDN_MAX_CHANNELS];
+/* Local Stop requests, served by the server task */
+static volatile bool     s_server_running = false;
+static volatile bool     s_cancel_requested = false;
+static esp_err_t         s_cancel_result = ESP_OK;
+static SemaphoreHandle_t s_cancel_done = NULL;
 
-/* Feed */
-static volatile bool s_feed_running = false;
-static volatile bool s_output_armed = false;
-static TaskHandle_t  s_feed_task_h  = NULL;
+/*
+   Feed. s_feed_alive is the server task's view: set when it creates the
+   task, cleared only once the task has signalled s_feed_done on its way out.
+*/
+static volatile bool     s_feed_cancel = false;
+static bool              s_feed_alive  = false;
+static uint32_t          s_output_gen  = 0;
+static SemaphoreHandle_t s_feed_wake   = NULL;   /* interrupts the feed's idle waits */
+static SemaphoreHandle_t s_feed_done   = NULL;
 
 /* Feed buffers (static = no stack pressure) */
 static int16_t     s_feed_packet[RP_STREAM_SAMPLES_PER_PACKET][RP_SAMPLE_CHANNELS];
@@ -321,7 +304,7 @@ static rp_sample_t s_feed_stage[RP_STREAM_SAMPLES_PER_PACKET];
 /* -- Decoder ---------------------------------------------------------------- */
 static idn_decoder_caps_t s_decoder_caps;
 
-static void log_decoder_reject(uint8_t ch_id, idn_channel_t *ch, const char *what,
+static void log_decoder_reject(uint8_t ch_id, idn_channel_decoder_t *ch, const char *what,
                                idn_decoder_result_t r)
 {
     if (ch->last_reject == r.reason) return;
@@ -332,10 +315,20 @@ static void log_decoder_reject(uint8_t ch_id, idn_channel_t *ch, const char *wha
 }
 
 /* -- Feed task -------------------------------------------------------------- */
+static inline bool feed_cancelled(void)
+{
+    return __atomic_load_n(&s_feed_cancel, __ATOMIC_ACQUIRE);
+}
+
+/* Idle wait that a cancellation cuts short. */
+static inline void feed_wait(TickType_t ticks)
+{
+    xSemaphoreTake(s_feed_wake, ticks > 0 ? ticks : 1);
+}
+
 static void feed_task(void *arg)
 {
     (void)arg;
-    s_feed_running = true;
 
     /* Initial "last known" point: blanked, at origin */
     rp_sample_t last;
@@ -349,12 +342,7 @@ static void feed_task(void *arg)
 
     ESP_LOGI(TAG, "IDN feed task started");
 
-    while (s_feed_running) {
-        if (!s_output_armed) {
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
-        }
-
+    while (!feed_cancelled()) {
         /*
            Send only full packets while the stream is flowing. Padding a
            partial packet splices filler into the drawing, and the RP buffer
@@ -377,12 +365,12 @@ static void feed_task(void *arg)
 
             if (avail == 0 || !idle) {
                 /* A stream that idles on a packet boundary has no tail to flush; start what is queued. */
-                if (avail == 0 && idle && !output_started && queued_before_start > 0) {
+                if (avail == 0 && idle && !output_started && queued_before_start > 0 && !feed_cancelled()) {
                     rp_manager_output_start();
                     output_started = true;
                     ESP_LOGI(TAG, "IDN RP output started");
                 }
-                vTaskDelay(1);
+                feed_wait(1);
                 continue;
             }
 
@@ -412,7 +400,7 @@ static void feed_task(void *arg)
             queued_before_start += got;
 
             /* Start once a short cushion is queued, or when a short stream is flushed. */
-            if (!output_started &&
+            if (!output_started && !feed_cancelled() &&
                 (queued_before_start >= IDN_FEED_PREBUFFER || got < (uint32_t)RP_STREAM_SAMPLES_PER_PACKET)) {
                 rp_manager_output_start();
                 output_started = true;
@@ -421,7 +409,7 @@ static void feed_task(void *arg)
             protocol_stream_stats_add_samples(PROTOCOL_STREAM_IDN, got);
         } else {
             ESP_LOGW(TAG, "send_samples_packet: %s", esp_err_to_name(err));
-            vTaskDelay(pdMS_TO_TICKS(2));
+            feed_wait(pdMS_TO_TICKS(2));
         }
 
         taskYIELD();
@@ -433,93 +421,66 @@ static void feed_task(void *arg)
     else if (queued_before_start > 0)
         rp_manager_output_discard_unstarted();
     ESP_LOGI(TAG, "IDN feed task exiting");
-    s_feed_task_h = NULL;
+
+    /* Last touch of shared state: the server may reset the ring after this. */
+    xSemaphoreGive(s_feed_done);
     vTaskDelete(NULL);
 }
 
 static esp_err_t feed_start(void)
 {
-    /* Wait briefly in case a prior task is still winding down after a
-     * non-blocking feed_stop().  Normal exit takes < 10 ms; the 300 ms
-     * budget is a safety net for a task blocked inside send_samples_packet. */
-    for (int i = 0; i < 30 && s_feed_task_h != NULL; i++)
-        vTaskDelay(pdMS_TO_TICKS(10));
-
-    if (s_feed_task_h != NULL) {
-        /* Task is still alive after 300 ms - rearm it rather than spawning
-         * a second one.  s_output_armed will be set by process_wave_chunk(). */
-        s_feed_running = true;
-        return ESP_OK;
+    /* Never rearm or overlap a task that has not acknowledged its exit. */
+    if (s_feed_alive) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    s_feed_running = true;
+    __atomic_store_n(&s_feed_cancel, false, __ATOMIC_RELEASE);
+    xSemaphoreTake(s_feed_wake, 0);
+    xSemaphoreTake(s_feed_done, 0);
+
     BaseType_t ok = xTaskCreatePinnedToCore(
-        feed_task, "idn_feed", STACK_FEED, NULL, IDN_FEED_TASK_PRIORITY, &s_feed_task_h, IDN_FEED_TASK_CORE);
+        feed_task, "idn_feed", STACK_FEED, NULL, IDN_FEED_TASK_PRIORITY, NULL, IDN_FEED_TASK_CORE);
     if (ok != pdPASS) {
-        s_feed_running = false;
-        s_feed_task_h  = NULL;
         return ESP_ERR_NO_MEM;
     }
+    s_feed_alive = true;
     return ESP_OK;
 }
 
-static void feed_stop(void)
+/*
+   Cancel the feed and wait for it to exit. Its exit path releases the RP
+   output (STOP, or CLEAR of an unstarted prebuffer) before acknowledging.
+   false: still running after the deadline; the ring must not be touched.
+*/
+static bool feed_stop_wait(uint32_t timeout_ms)
 {
-    s_feed_running = false;
-    s_output_armed = false;
-    /* Non-blocking: the feed task checks s_feed_running on every loop
-     * iteration and exits on its own.  feed_start() will wait if needed. */
+    if (!s_feed_alive) {
+        return true;
+    }
+
+    __atomic_store_n(&s_feed_cancel, true, __ATOMIC_RELEASE);
+    xSemaphoreGive(s_feed_wake);
+
+    if (xSemaphoreTake(s_feed_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return false;
+    }
+    s_feed_alive = false;
+    return true;
 }
 
-/* -- Session management ----------------------------------------------------- */
-static void session_close(void)
+static bool feed_poll_stopped(void)
 {
-    if (!s_client_active) return;
-    ESP_LOGI(TAG, "IDN session closed");
-    feed_stop();
+    if (s_feed_alive && xSemaphoreTake(s_feed_done, 0) == pdTRUE) {
+        s_feed_alive = false;
+    }
+    return !s_feed_alive;
+}
+
+static void output_reset(void)
+{
     ring_clear();
-    memset(s_channels, 0, sizeof(s_channels));
-    s_client_active = false;
     s_applied_rate = 0;
     s_requested_rate = 0;
-}
-
-static void session_check_timeout(void)
-{
-    if (!s_client_active) return;
-    if (esp_timer_get_time() - s_link_last_us > IDN_LINK_TIMEOUT_US) {
-        ESP_LOGW(TAG, "IDN link timeout");
-        session_close();
-    }
-}
-
-/*
- * Called on every valid RT packet from a client.
- * Opens a new session if none active; touches the timeout on existing one.
- * Returns false if the packet is from a different (blocked) client.
- */
-static bool session_touch(const struct sockaddr_in *from)
-{
-    if (!s_client_active) {
-        s_client_addr   = *from;
-        s_client_active = true;
-        ESP_LOGI(TAG, "IDN new session from %s:%d",
-                 inet_ntoa(from->sin_addr), ntohs(from->sin_port));
-        feed_start();
-        apply_sample_rate(30000);   /* safe default; overridden by wave chunk duration */
-    } else {
-        /* Match by IP only - source port can change on sender reconnect */
-        if (from->sin_addr.s_addr != s_client_addr.sin_addr.s_addr) {
-            return false;   /* different host, occupied */
-        }
-        if (from->sin_port != s_client_addr.sin_port) {
-            ESP_LOGI(TAG, "IDN client port changed %d->%d",
-                     ntohs(s_client_addr.sin_port), ntohs(from->sin_port));
-            s_client_addr.sin_port = from->sin_port;
-        }
-    }
-    s_link_last_us = esp_timer_get_time();
-    return true;
 }
 
 /* -- Send helpers ----------------------------------------------------------- */
@@ -558,12 +519,15 @@ static void send_pkt(const struct sockaddr_in *dest,
 }
 
 static void send_ack(const struct sockaddr_in *dest,
-                     uint8_t flags, uint16_t seq, uint8_t result_code)
+                     uint8_t flags, uint16_t seq, const idn_session_ack_t *a)
 {
     idn_ack_hdr_t ack;
     memset(&ack, 0, sizeof(ack));
     ack.struct_size = sizeof(ack);
-    ack.result_code = result_code;
+    ack.result_code = a->result;
+    wr16((uint8_t *)&ack.input_event_flags, a->input_events);
+    wr16((uint8_t *)&ack.pipeline_event_flags, a->pipeline_events);
+    ack.status_flags = a->status;
     send_pkt(dest, IDNCMD_RT_ACK, flags, seq, &ack, sizeof(ack));
 }
 
@@ -610,55 +574,22 @@ static void handle_svcmap_req(const struct sockaddr_in *from,
     send_pkt(from, IDNCMD_SVCMAP_RESP, flags, seq, buf, sizeof(buf));
 }
 
-/* -- Channel configuration -------------------------------------------------- */
-static void process_channel_config(uint8_t ch_id,
-                                    const idn_chan_cfg_hdr_t *cfg,
-                                    const uint8_t *svc_data,
-                                    uint16_t svc_bytes)
-{
-    if (ch_id >= IDN_MAX_CHANNELS) return;
-    idn_channel_t *ch = &s_channels[ch_id];
-
-    if (cfg->cfl & 0x01) {   /* Routing bit: open/configure */
-        if (!ch->open)
-            ESP_LOGI(TAG, "Channel %u opened, mode=0x%02X",
-                     ch_id, cfg->service_mode);
-        ch->open         = true;
-        ch->service_mode = cfg->service_mode;
-
-        /* Every routing configuration is compiled; a rejected one leaves the channel without a decoder. */
-        idn_decoder_result_t r = idn_decoder_compile(svc_data, svc_bytes, &s_decoder_caps, &ch->layout);
-        if (r.status == IDN_DECODER_OK) {
-            if (ch->last_reject != IDN_DECODER_REASON_NONE)
-                ESP_LOGI(TAG, "Channel %u configuration accepted", ch_id);
-            ch->last_reject = IDN_DECODER_REASON_NONE;
-            ESP_LOGD(TAG, "Tag dict: %u bytes/sample", ch->layout.stride);
-        } else {
-            log_decoder_reject(ch_id, ch, "configuration", r);
-        }
-    }
-}
-
 /* -- Wave chunk processing -------------------------------------------------- */
-static void process_wave_chunk(uint8_t ch_id,
-                                const uint8_t *data, uint16_t data_len)
+/*
+   Decode a wave chunk the session has accepted for a routed channel. The
+   whole chunk was validated by ops_wave_check() (header, duration, exact
+   stride, >= 20 samples); it is queued whole or not at all.
+*/
+static idn_chunk_result_t process_wave_chunk(uint8_t ch_id,
+                                             const uint8_t *data, uint16_t data_len)
 {
-    if (ch_id >= IDN_MAX_CHANNELS) return;
-    idn_channel_t *ch = &s_channels[ch_id];
+    idn_channel_decoder_t *ch = &s_decoders[ch_id];
 
-    /* No auto-open and no default layout: data needs a routed channel whose configuration compiled. */
-    if (!ch->open || !ch->layout.valid) {
-        ESP_LOGD(TAG, "Wave chunk on channel %u without accepted configuration dropped", ch_id);
-        return;
-    }
-
-    /* Whole chunk is validated (header, duration, exact stride, >= 20 samples) before decoding. */
     uint32_t nsamples = 0, duration_us = 0;
     idn_decoder_result_t r = idn_decoder_check_wave_chunk(&ch->layout, data, data_len,
                                                           &nsamples, &duration_us);
     if (r.status != IDN_DECODER_OK) {
-        log_decoder_reject(ch_id, ch, "wave chunk", r);
-        return;
+        return IDN_CHUNK_INTERNAL;  /* checked just before; cannot differ */
     }
 
     const uint8_t *samples = data + IDN_DECODER_WAVE_HEADER_BYTES;
@@ -671,11 +602,10 @@ static void process_wave_chunk(uint8_t ch_id,
     /* Queue the whole chunk or none of it; this task is the only producer. */
     if (nsamples > ring_free()) {
         protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples);
-        return;
+        return IDN_CHUNK_DEVICE_OVERRUN;
     }
 
     rp_sample_t burst[64];
-    uint32_t    written  = 0;
 
     for (uint32_t s = 0; s < nsamples; ) {
         uint32_t n = nsamples - s;
@@ -685,130 +615,227 @@ static void process_wave_chunk(uint8_t ch_id,
             idn_decoder_decode(&ch->layout, samples + (size_t)(s + j) * stride, 1, &burst[j].ch);
 
         uint32_t w = ring_write(burst, n);
-        written += w;
         if (w < n) {
             /* Ring full: the rest of this chunk is lost. Count it. */
             protocol_stream_stats_add_dropped(PROTOCOL_STREAM_IDN, nsamples - s - w);
-            break;
+            return IDN_CHUNK_DEVICE_OVERRUN;
         }
         s += n;
     }
 
-    if (written > 0 && !s_output_armed)
-        s_output_armed = true;
+    return IDN_CHUNK_OK;
 }
+
+/* -- Session actions (idn_session_ops_t) ------------------------------------ */
+static const char *stop_reason_name(idn_stop_reason_t reason)
+{
+    switch (reason) {
+        case IDN_STOP_CHANNEL_CLOSE: return "channel close";
+        case IDN_STOP_ROUTE_CHANGE:  return "route change";
+        case IDN_STOP_GRACEFUL:      return "connection close";
+        case IDN_STOP_ABORT:         return "abort";
+        case IDN_STOP_TIMEOUT:       return "link timeout";
+        case IDN_STOP_EXCLUDED:      return "group excluded";
+        case IDN_STOP_CANCEL:        return "local stop";
+        default:                     return "?";
+    }
+}
+
+/*
+   Compile through idn_decoder (plan 01). There is no default layout: an
+   absent or rejected dictionary leaves the channel without a decoder, and
+   the session voids the channel. idn_decoder_compile() resets the layout on
+   any error, so a failed replacement never falls back to the old one.
+*/
+static idn_cfg_result_t ops_config_compile(void *ctx, uint8_t ch_id, uint8_t mode,
+                                           const uint8_t *cfg, uint16_t cfg_len)
+{
+    (void)ctx;
+    (void)mode;
+
+    idn_channel_decoder_t *ch = &s_decoders[ch_id];
+    idn_decoder_result_t r = idn_decoder_compile(cfg, cfg_len, &s_decoder_caps, &ch->layout);
+
+    switch (r.status) {
+        case IDN_DECODER_OK:
+            if (ch->last_reject != IDN_DECODER_REASON_NONE)
+                ESP_LOGI(TAG, "Channel %u configuration accepted", ch_id);
+            ch->last_reject = IDN_DECODER_REASON_NONE;
+            ESP_LOGI(TAG, "Channel %u routed, %u bytes/sample", ch_id, ch->layout.stride);
+            return IDN_CFG_OK;
+        case IDN_DECODER_ERR_UNSUPPORTED:
+            log_decoder_reject(ch_id, ch, "configuration", r);
+            return IDN_CFG_UNSUPPORTED;
+        case IDN_DECODER_ERR_RESOURCE:
+            log_decoder_reject(ch_id, ch, "configuration", r);
+            return IDN_CFG_NO_RESOURCES;
+        default:
+            log_decoder_reject(ch_id, ch, "configuration", r);
+            return IDN_CFG_INVALID;
+    }
+}
+
+static void ops_config_discard(void *ctx, uint8_t ch_id)
+{
+    (void)ctx;
+    memset(&s_decoders[ch_id].layout, 0, sizeof(s_decoders[ch_id].layout));
+}
+
+static idn_chunk_result_t ops_wave_check(void *ctx, uint8_t ch_id,
+                                         const uint8_t *chunk, uint16_t chunk_len)
+{
+    (void)ctx;
+
+    idn_channel_decoder_t *ch = &s_decoders[ch_id];
+    uint32_t nsamples = 0, duration_us = 0;
+    idn_decoder_result_t r = idn_decoder_check_wave_chunk(&ch->layout, chunk, chunk_len,
+                                                          &nsamples, &duration_us);
+    if (r.status == IDN_DECODER_OK) {
+        return IDN_CHUNK_OK;
+    }
+
+    log_decoder_reject(ch_id, ch, "wave chunk", r);
+
+    switch (r.reason) {
+        case IDN_DECODER_REASON_CHUNK_HEADER:
+        case IDN_DECODER_REASON_TOO_FEW_SAMPLES:
+            return IDN_CHUNK_TOO_SHORT;
+        case IDN_DECODER_REASON_INVALID_LAYOUT:
+            return IDN_CHUNK_INTERNAL;
+        default:
+            return r.status == IDN_DECODER_ERR_UNSUPPORTED ? IDN_CHUNK_UNSUPPORTED
+                                                           : IDN_CHUNK_PAYLOAD_INVALID;
+    }
+}
+
+static bool ops_output_acquire(void *ctx, uint32_t gen)
+{
+    (void)ctx;
+
+    if (s_feed_alive) {
+        return false;   /* the last feed never acknowledged its stop */
+    }
+
+    output_reset();
+    s_output_gen = gen;
+
+    if (feed_start() != ESP_OK) {
+        ESP_LOGE(TAG, "IDN feed task start failed");
+        return false;
+    }
+
+    apply_sample_rate(30000);   /* safe default; overridden by wave chunk duration */
+    ESP_LOGI(TAG, "IDN output %lu acquired", (unsigned long)gen);
+    return true;
+}
+
+static idn_chunk_result_t ops_wave_enqueue(void *ctx, uint8_t ch_id, uint32_t gen,
+                                           const uint8_t *data, uint16_t data_len)
+{
+    (void)ctx;
+
+    if (gen != s_output_gen || !s_feed_alive) {
+        return IDN_CHUNK_INTERNAL;
+    }
+    return process_wave_chunk(ch_id, data, data_len);
+}
+
+static bool ops_output_release(void *ctx, uint32_t gen, idn_stop_reason_t reason)
+{
+    (void)ctx;
+
+    if (!feed_stop_wait(IDN_FEED_STOP_TIMEOUT_MS)) {
+        ESP_LOGE(TAG, "IDN output %lu: feed did not stop within %u ms (%s); IDN unavailable until it does",
+                 (unsigned long)gen, (unsigned)IDN_FEED_STOP_TIMEOUT_MS, stop_reason_name(reason));
+        return false;
+    }
+
+    output_reset();
+    ESP_LOGI(TAG, "IDN output %lu released (%s)", (unsigned long)gen, stop_reason_name(reason));
+    return true;
+}
+
+static bool ops_output_quiescent(void *ctx)
+{
+    (void)ctx;
+
+    if (!feed_poll_stopped()) {
+        return false;
+    }
+    output_reset();
+    return true;
+}
+
+static const idn_session_ops_t s_session_ops = {
+    .config_compile   = ops_config_compile,
+    .config_discard   = ops_config_discard,
+    .wave_check       = ops_wave_check,
+    .output_acquire   = ops_output_acquire,
+    .wave_enqueue     = ops_wave_enqueue,
+    .output_release   = ops_output_release,
+    .output_quiescent = ops_output_quiescent,
+};
 
 /* -- IDN-RT packet handler -------------------------------------------------- */
 static void handle_rt_packet(const struct sockaddr_in *from,
                               uint8_t cmd, uint8_t flags, uint16_t seq,
                               const uint8_t *payload, uint16_t payload_len)
 {
-    bool need_ack = (cmd == IDNCMD_RT_CHANNEL_ACK || cmd == IDNCMD_RT_CLOSE_ACK);
-    bool do_close = (cmd == IDNCMD_RT_CLOSE       || cmd == IDNCMD_RT_CLOSE_ACK);
+    /* The socket is wildcard-bound: the local address is not known (0). */
+    idn_endpoint_t ep = {
+        .peer_addr  = from->sin_addr.s_addr,
+        .peer_port  = from->sin_port,
+        .local_addr = 0,
+    };
+    idn_rt_outcome_t out;
 
-    /* Check if occupied by a different client (match IP only; port can change) */
-    if (s_client_active &&
-        from->sin_addr.s_addr != s_client_addr.sin_addr.s_addr) {
-        if (need_ack) send_ack(from, flags, seq, IDNACK_OCCUPIED);
-        return;
+    idn_session_rt(&s_session, esp_timer_get_time(), &ep, cmd, flags, seq,
+                   payload, payload_len, &out);
+
+    if (out.connection_opened)
+        ESP_LOGI(TAG, "IDN session from %s:%d",
+                 inet_ntoa(from->sin_addr), ntohs(from->sin_port));
+    if (out.connection_closed)
+        ESP_LOGI(TAG, "IDN session closed (%s)",
+                 cmd == IDN_CMD_RT_ABORT ? "abort" : "close");
+
+    if (out.send_ack) send_ack(from, flags, seq, &out.ack);
+}
+
+static void handle_group_req(const struct sockaddr_in *from, uint8_t flags, uint16_t seq,
+                             const uint8_t *payload, uint16_t payload_len)
+{
+    uint8_t resp[IDN_GROUP_RESP_BYTES];
+    bool was_active = s_session.state == IDN_SESSION_ACTIVE;
+
+    idn_session_group_request(&s_session, payload, payload_len, resp);
+
+    if (resp[1] == IDN_GROUP_OK && payload_len >= 2 && payload[1] == 0x02)
+        ESP_LOGI(TAG, "IDN client group mask 0x%02X%02X", resp[2], resp[3]);
+    if (was_active && s_session.state != IDN_SESSION_ACTIVE)
+        ESP_LOGI(TAG, "IDN session closed (client group excluded)");
+
+    send_pkt(from, IDN_CMD_GROUP_RESP, flags, seq, resp, sizeof(resp));
+}
+
+static void session_tick(void)
+{
+    idn_session_state_t before = s_session.state;
+
+    idn_session_tick(&s_session, esp_timer_get_time());
+
+    if (before == IDN_SESSION_ACTIVE && s_session.state != IDN_SESSION_ACTIVE)
+        ESP_LOGW(TAG, "IDN link timeout");
+    if (before == IDN_SESSION_FAULTED && s_session.state == IDN_SESSION_FREE)
+        ESP_LOGI(TAG, "IDN feed stopped late; session available again");
+
+    if (__atomic_exchange_n(&s_cancel_requested, false, __ATOMIC_ACQ_REL)) {
+        if (s_session.state == IDN_SESSION_ACTIVE)
+            ESP_LOGI(TAG, "IDN session closed (local stop)");
+        idn_session_cancel(&s_session, IDN_STOP_CANCEL);
+        s_cancel_result = s_session.output_fault ? ESP_ERR_TIMEOUT : ESP_OK;
+        xSemaphoreGive(s_cancel_done);
     }
-
-    /* A close with no session open (a repeated close, say) must not open one. */
-    if (!s_client_active && do_close && payload_len == 0) {
-        if (need_ack) send_ack(from, flags, seq, IDNACK_OK);
-        return;
-    }
-
-    if (!session_touch(from)) {
-        if (need_ack) send_ack(from, flags, seq, IDNACK_OCCUPIED);
-        return;
-    }
-
-    /* Empty payload = keepalive */
-    if (payload_len == 0) {
-        if (need_ack) send_ack(from, flags, seq, IDNACK_OK);
-        if (do_close) session_close();
-        return;
-    }
-
-    /* Need at least the 8-byte IDN-Stream channel message header */
-    if (payload_len < (uint16_t)sizeof(idn_stream_hdr_t)) {
-        if (need_ack) send_ack(from, flags, seq, IDNACK_INVALID);
-        return;
-    }
-
-    const idn_stream_hdr_t *smsg = (const idn_stream_hdr_t *)payload;
-    uint16_t msg_size   = rd16((const uint8_t *)&smsg->total_size);
-    uint8_t  cnl        = smsg->cnl;
-    uint8_t  chunk_type = smsg->chunk_type;
-    bool     cclf       = (cnl & 0x40) != 0;   /* bit6=CONFIG_LSTFRG; bit7 is always 1 (CHANNELMSG) */
-    uint8_t  ch_id      = cnl & 0x3F;
-
-    /* Sanity check */
-    if (msg_size < (uint16_t)sizeof(idn_stream_hdr_t) || msg_size > payload_len) {
-        if (need_ack) send_ack(from, flags, seq, IDNACK_INVALID);
-        return;
-    }
-
-    const uint8_t *cursor = payload + sizeof(idn_stream_hdr_t);
-    uint16_t cursor_len   = msg_size - (uint16_t)sizeof(idn_stream_hdr_t);
-
-    /* -- Channel configuration header ------------------------------------ */
-    bool close_channel_after = false;
-
-    if (cclf && chunk_type < CHUNK_FRAGMENT_MIN) {
-        if (cursor_len < (uint16_t)sizeof(idn_chan_cfg_hdr_t)) {
-            if (need_ack) send_ack(from, flags, seq, IDNACK_INVALID);
-            return;
-        }
-        const idn_chan_cfg_hdr_t *cfg = (const idn_chan_cfg_hdr_t *)cursor;
-        cursor     += sizeof(idn_chan_cfg_hdr_t);
-        cursor_len -= (uint16_t)sizeof(idn_chan_cfg_hdr_t);
-
-        uint16_t svc_bytes = (uint16_t)cfg->scwc * 4;
-        if (svc_bytes > cursor_len) {
-            /* Never shorten the declared configuration to fit; nothing on this channel decodes until a whole one arrives. */
-            if (ch_id < IDN_MAX_CHANNELS)
-                s_channels[ch_id].layout.valid = false;
-            if (need_ack) send_ack(from, flags, seq, IDNACK_INVALID);
-            return;
-        }
-
-        process_channel_config(ch_id, cfg, cursor, svc_bytes);
-
-        cursor     += svc_bytes;
-        cursor_len -= svc_bytes;
-
-        close_channel_after = (cfg->cfl & 0x02) != 0;
-    }
-
-    /* -- Data chunk ------------------------------------------------------- */
-    if (chunk_type == CHUNK_VOID) {
-        /* no-op, used for keepalive or config-only messages */
-    } else if (chunk_type == CHUNK_WAVE) {
-        if (cursor_len > 0)
-            process_wave_chunk(ch_id, cursor, cursor_len);
-    } else if (chunk_type < CHUNK_FRAGMENT_MIN) {
-        /* Frame samples (discrete mode) - not implemented, silently skip */
-        ESP_LOGD(TAG, "Unhandled chunk type 0x%02X on channel %u",
-                 chunk_type, ch_id);
-    } else {
-        /* Fragment continuation (0xC0+) - not implemented */
-    }
-
-    /* -- Channel close ---------------------------------------------------- */
-    if (close_channel_after && ch_id < IDN_MAX_CHANNELS) {
-        s_channels[ch_id].open = false;
-        ESP_LOGI(TAG, "Channel %u closed", ch_id);
-
-        bool any_open = false;
-        for (int i = 0; i < IDN_MAX_CHANNELS; i++)
-            if (s_channels[i].open) { any_open = true; break; }
-        if (!any_open) session_close();
-    }
-
-    if (need_ack) send_ack(from, flags, seq, IDNACK_OK);
-    if (do_close) session_close();
 }
 
 /* -- Main server task ------------------------------------------------------- */
@@ -848,11 +875,13 @@ static void server_task(void *arg)
     ESP_LOGI(TAG, "IDN-Hello server on UDP port %d", IDN_UDP_PORT);
 
     /*
-     * rxbuf: 1500 bytes covers a full Ethernet MTU payload.
-     * Wave sample packets can be up to ~1480 bytes (payload after IDN headers).
-     * Declared static to keep it off the task stack.
+     * One octet more than the largest accepted datagram, so a longer one
+     * (which recvfrom truncates silently) can be recognised and dropped
+     * instead of parsed or echoed in part. Static to keep it off the stack.
      */
-    static uint8_t rxbuf[1500];
+    static uint8_t rxbuf[IDN_RX_MAX + 1];
+
+    s_server_running = true;
 
     while (true) {
         struct sockaddr_in from;
@@ -861,10 +890,14 @@ static void server_task(void *arg)
         int n = recvfrom(s_sock, rxbuf, sizeof(rxbuf), 0,
                          (struct sockaddr *)&from, &from_len);
 
-        /* Check link timeout on every loop iteration, even on recv timeout */
-        session_check_timeout();
+        /* Link timeout and Stop requests on every loop iteration, even on recv timeout */
+        session_tick();
 
         if (n < 4) continue;    /* too short or EAGAIN from SO_RCVTIMEO */
+        if (n > (int)IDN_RX_MAX) {
+            ESP_LOGD(TAG, "Datagram over %u bytes dropped", (unsigned)IDN_RX_MAX);
+            continue;
+        }
 
         uint8_t  cmd   = rxbuf[0];
         uint8_t  flags = rxbuf[1];
@@ -880,6 +913,10 @@ static void server_task(void *arg)
                          payload, payload_len);
                 break;
 
+            case IDN_CMD_GROUP_REQ:
+                handle_group_req(&from, flags, seq, payload, payload_len);
+                break;
+
             case IDNCMD_SCAN_REQ:
                 handle_scan_req(&from, flags, seq);
                 break;
@@ -888,10 +925,11 @@ static void server_task(void *arg)
                 handle_svcmap_req(&from, flags, seq);
                 break;
 
-            case IDNCMD_RT_CHANNEL:
-            case IDNCMD_RT_CHANNEL_ACK:
-            case IDNCMD_RT_CLOSE:
-            case IDNCMD_RT_CLOSE_ACK:
+            case IDN_CMD_RT_CHANNEL:
+            case IDN_CMD_RT_CHANNEL_ACK:
+            case IDN_CMD_RT_CLOSE:
+            case IDN_CMD_RT_CLOSE_ACK:
+            case IDN_CMD_RT_ABORT:
                 handle_rt_packet(&from, cmd, flags, seq, payload, payload_len);
                 break;
 
@@ -902,7 +940,22 @@ static void server_task(void *arg)
     }
 }
 
-/* -- Public init ------------------------------------------------------------ */
+/* -- Public API ------------------------------------------------------------- */
+esp_err_t idn_protocol_cancel_output(uint32_t timeout_ms)
+{
+    if (!s_server_running) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_cancel_done, 0);
+    __atomic_store_n(&s_cancel_requested, true, __ATOMIC_RELEASE);
+
+    if (xSemaphoreTake(s_cancel_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    return s_cancel_result;
+}
+
 esp_err_t idn_protocol_start(void)
 {
     ESP_LOGI(TAG, "Starting IDN protocol (IDN-Hello + IDN-RT)");
@@ -926,8 +979,14 @@ esp_err_t idn_protocol_start(void)
              IDN_RING_CAPACITY,
              (unsigned)(IDN_RING_CAPACITY * sizeof(rp_sample_t)));
 
-    memset(s_channels, 0, sizeof(s_channels));
+    s_feed_wake   = xSemaphoreCreateBinary();
+    s_feed_done   = xSemaphoreCreateBinary();
+    s_cancel_done = xSemaphoreCreateBinary();
+    if (!s_feed_wake || !s_feed_done || !s_cancel_done) return ESP_ERR_NO_MEM;
+
+    memset(s_decoders, 0, sizeof(s_decoders));
     idn_decoder_default_caps(&s_decoder_caps);
+    idn_session_init(&s_session, &s_session_ops);
 
     BaseType_t ok = xTaskCreatePinnedToCore(
         server_task, "idn_server", STACK_SERVER, NULL, 5, NULL, 0);

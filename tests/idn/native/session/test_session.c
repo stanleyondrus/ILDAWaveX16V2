@@ -150,6 +150,7 @@ typedef struct {
     uint8_t nsamples;
     uint8_t scm;
     int     size_delta;     /* corrupt the declared total size */
+    uint8_t scwc_extra;     /* declare more configuration words than sent */
 } msg_spec_t;
 
 static size_t build_msg(const msg_spec_t *m, uint8_t *buf)
@@ -169,7 +170,7 @@ static size_t build_msg(const msg_spec_t *m, uint8_t *buf)
     buf[4] = 0x00; buf[5] = 0x01; buf[6] = 0x00; buf[7] = 0x00;
 
     if (m->cfg) {
-        buf[n++] = m->scwc;
+        buf[n++] = (uint8_t)(m->scwc + m->scwc_extra);
         buf[n++] = m->cfl;
         buf[n++] = m->sid;
         buf[n++] = m->mode;
@@ -606,6 +607,31 @@ static const step_t s_user_cancel[] = {
     END
 };
 
+#define M_ROUTE_TRUNC(c)        { .present = true, .ch = (c), .chunk = IDN_CHUNK_VOID, .cfg = true, \
+                                  .cfl = ROUTING(0), .sid = 1, .mode = 1, .scwc = 4, .scwc_extra = 1 }
+
+static const step_t s_truncated_config[] = {
+    /* From a new link: malformed, nothing allocated */
+    RT(.ep = EP_A, .cmd = ACK, .msg = M_ROUTE_TRUNC(0),
+       .exp_result = X(IDN_RESULT_INVALID), .exp_session = X(IDN_SESSION_FREE)),
+    RT(.now = 0, .ep = EP_A, .cmd = ACK, .msg = M_ROUTE_WAVE(0, 0), .d_compile = 1, .d_acquire = 1, .d_enqueue = 1),
+    /* From another port: no effect on the live channel */
+    RT(.ep = EP_A_PORT2, .cmd = ACK, .msg = M_ROUTE_TRUNC(0),
+       .exp_result = X(IDN_RESULT_INVALID), .exp_ch = X(0), .exp_ch_state = X(IDN_CHANNEL_ROUTED_ACTIVE)),
+    /* From the connection: the decoder is void until a whole configuration arrives */
+    RT(.now = 900000, .ep = EP_A, .cmd = ACK, .msg = M_ROUTE_TRUNC(0),
+       .exp_result = X(IDN_RESULT_INVALID), .exp_ch = X(0), .exp_ch_state = X(IDN_CHANNEL_VOIDED),
+       .exp_reason = X(IDN_STOP_ROUTE_CHANGE), .d_release = 1),
+    RT(.now = 900000, .ep = EP_A, .cmd = ACK, .msg = M_WAVE(0, 0),
+       .exp_ch = X(0), .exp_ch_state = X(IDN_CHANNEL_VOIDED), .exp_pev = X(IDN_PEV_CFGERR)),
+    RT(.now = 900000, .ep = EP_A, .cmd = ACK, .msg = M_ROUTE_WAVE(0, 0),
+       .exp_ch = X(0), .exp_ch_state = X(IDN_CHANNEL_ROUTED_ACTIVE), .exp_pev = X(IDN_PEV_CNLRTED),
+       .d_compile = 1, .d_acquire = 1, .d_enqueue = 1),
+    /* The truncated packet did not refresh the link; the later valid ones did */
+    TICK(.now = 1899999, .exp_session = X(IDN_SESSION_ACTIVE)),
+    END
+};
+
 static const scenario_t k_scenarios[] = {
     { "empty RT allocates session only",            s_empty_allocates_only },
     { "routing + Void chunk -> ROUTED_IDLE",         s_route_void_idle },
@@ -634,6 +660,7 @@ static const scenario_t k_scenarios[] = {
     { "service ID 0 selects default",                s_default_service_id },
     { "chunk type and minimum length",               s_wrong_chunk_type },
     { "local cancel (web Stop)",                     s_user_cancel },
+    { "truncated configuration voids the decoder",   s_truncated_config },
 };
 
 /* -- Runner ----------------------------------------------------------------- */
