@@ -1,0 +1,932 @@
+{
+ "schema": "idn-fixtures/1",
+ "family": "rt-sequences",
+ "description": "Stateful multi-datagram sequences with expected receiver outcomes",
+ "sources": {
+  "Stream": {
+   "title": "The ILDA Digital Network - Stream Specification",
+   "identifier": "IDN-Stream",
+   "revision": "Revision 002, July 2025",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/ILDA-IDN-Stream-rev002.pdf (untracked; not redistributed in this repository)"
+  },
+  "Hello": {
+   "title": "The ILDA Digital Network - Hello Protocol Specification",
+   "identifier": "IDN-Hello",
+   "revision": "Draft 2022-03-27 (not yet adopted by ILDA)",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/IDN-Hello-2022-03-27-draft.pdf (untracked; not redistributed in this repository)"
+  }
+ },
+ "fixtures": [
+   {
+    "id": "seq-wrap",
+    "kind": "sequence",
+    "summary": "RT sequence wraps 0xFFFF -> 0x0000",
+    "refs": ["Hello 2.1 p7", "Hello 6 p20"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "ffff", "value": "0xFFFF", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 1000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0000", "value": "0x0000", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {
+     "sequence_errors": [],
+     "connection": "open"
+    }
+   },
+   {
+    "id": "seq-duplicate",
+    "kind": "sequence",
+    "summary": "Duplicate RT sequence number",
+    "refs": ["Hello 6 p20 (SHOULD discard duplicates)", "Hello 6.3.3 p27"],
+    "interpretation": "project",
+    "note": "Type 1 (not +1) is always set with type 2/3 per the bitmask description; plan 03 owns exact bit policy.",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "p1-dup",
+       "source": "192.0.2.10:50000",
+       "at_us": 1000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {
+     "sequence_errors": ["duplicate"],
+     "ack_input_seqerr_bits": "0b0011",
+     "second_packet": "discarded"
+    }
+   },
+   {
+    "id": "seq-gap",
+    "kind": "sequence",
+    "summary": "Missing RT sequence number",
+    "refs": ["Hello 6.3.3 p27"],
+    "interpretation": "project",
+    "note": "Hello 6 only requires tracking; processing the packet after a gap (no retransmission exists) and the exact SeqErr bits are plan 03 policy.",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 1000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {
+     "sequence_errors": ["missing"],
+     "ack_input_seqerr_bits": "0b0101",
+     "second_packet": "processed"
+    }
+   },
+   {
+    "id": "seq-delayed-older",
+    "kind": "sequence",
+    "summary": "Older packet arrives after a newer one",
+    "refs": ["Hello 6 p20", "Hello 6.3.3 p27"],
+    "interpretation": "project",
+    "note": "Hello 6 says servers could check ordering; the drop-or-reorder choice is plan 03 policy, but stale output after newer data is never acceptable.",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "p2",
+       "source": "192.0.2.10:50000",
+       "at_us": 1000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "p1-late",
+       "source": "192.0.2.10:50000",
+       "at_us": 2000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0006", "value": "0x0006", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {
+     "sequence_errors": ["not-monotonic", "missing (until window resolves)"],
+     "late_packet": "discarded or reordered, never output after newer data"
+    }
+   },
+   {
+    "id": "seq-interleaved-management",
+    "kind": "sequence",
+    "summary": "Ping with an unrelated sequence between RT packets from the same port",
+    "refs": ["Hello 2.1 p7 (request/response sequence is per transaction)", "Hello 7.1 p32"],
+    "interpretation": "project",
+    "note": "RT sequence tracking applies to IDN-RT commands only.",
+    "steps": [
+      {
+       "label": "rt0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0010", "value": "0x0010", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "ping",
+       "source": "192.0.2.10:50000",
+       "at_us": 500,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "08", "value": "0x08 ping request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "9000", "value": "0x9000", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "rt1",
+       "source": "192.0.2.10:50000",
+       "at_us": 1000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0011", "value": "0x0011", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {
+     "sequence_errors": [],
+     "ping": "answered with sequence 0x9000"
+    }
+   },
+   {
+    "id": "seq-timestamp-wrap-continuous",
+    "kind": "sequence",
+    "summary": "Wave timestamps wrap 2^32 with exact continuity",
+    "refs": ["Stream 2.1 p9 (wraps handled by consumer)", "Stream 6.1 p38"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 88,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0054", "value": "84 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "ffffff9a", "value": "4294967194 us (0xFFFFFF9A)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "02", "value": "2 words (8 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 20, "field": "dict[2]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 22, "field": "dict[3]", "hex": "0000", "value": "0x0000 Void (alignment)", "ref": "Stream 3.4.2 p17"},
+         {"offset": 24, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 25, "field": "wave.duration", "hex": "00029b", "value": "667 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 28, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 76, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 79, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 82, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 85, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 667,
+       "length": 76,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0048", "value": "72 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000235", "value": "565 us (0x00000235)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00029b", "value": "667 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 16, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 19, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 22, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 25, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 28, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      }
+    ],
+    "expect": {
+     "continuity_errors": [],
+     "samples_output": 40
+    }
+   },
+   {
+    "id": "seq-timestamp-gap",
+    "kind": "sequence",
+    "summary": "Wave timestamp jumps 1000 us past the previous chunk's end",
+    "refs": ["Stream 6.1 p38", "Hello 6.3.3 p29 (CTYErr)"],
+    "interpretation": "project",
+    "note": "Whether the gap is filled, blanked or the channel resynchronised is plan 03's timing policy.",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 88,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0054", "value": "84 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "ffffff9a", "value": "4294967194 us (0xFFFFFF9A)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "02", "value": "2 words (8 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 20, "field": "dict[2]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 22, "field": "dict[3]", "hex": "0000", "value": "0x0000 Void (alignment)", "ref": "Stream 3.4.2 p17"},
+         {"offset": 24, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 25, "field": "wave.duration", "hex": "00029b", "value": "667 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 28, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 76, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 79, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 82, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 85, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 1667,
+       "length": 76,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0048", "value": "72 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "0000061d", "value": "1565 us (0x0000061D)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00029b", "value": "667 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 16, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 19, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 22, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 25, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 28, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      }
+    ],
+    "expect": {
+     "continuity_errors": ["gap 1000 us"],
+     "ack_pipeline_flag": "CTYErr"
+    }
+   },
+   {
+    "id": "seq-equal-void-timestamps",
+    "kind": "sequence",
+    "summary": "Two Void keepalive messages with the same timestamp",
+    "refs": ["Stream 2.1 p9 (identical timestamps are valid)", "Hello 6.1 p21"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "v0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 12,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0008", "value": "8 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "00", "value": "0x00 Void", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00001388", "value": "5000 us (0x00001388)", "ref": "Stream 2.1 p9"}
+       ]
+      },
+      {
+       "label": "v1",
+       "source": "192.0.2.10:50000",
+       "at_us": 100,
+       "length": 12,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0008", "value": "8 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "00", "value": "0x00 Void", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00001388", "value": "5000 us (0x00001388)", "ref": "Stream 2.1 p9"}
+       ]
+      }
+    ],
+    "expect": {
+     "timestamp_errors": [],
+     "connection": "open"
+    }
+   },
+   {
+    "id": "seq-last-channel-close-connection-live",
+    "kind": "sequence",
+    "summary": "Close the only channel, then keep the link with an empty packet",
+    "refs": ["Stream 2.2 p11 (Close)", "Hello 6.2.1 p22"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "route",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 24,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0014", "value": "20 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "00", "value": "0x00 Void", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000000", "value": "0 us (0x00000000)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "02", "value": "2 words (8 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 20, "field": "dict[2]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 22, "field": "dict[3]", "hex": "0000", "value": "0x0000 Void (alignment)", "ref": "Stream 3.4.2 p17"}
+       ]
+      },
+      {
+       "label": "close-ch",
+       "source": "192.0.2.10:50000",
+       "at_us": 100,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "000c", "value": "12 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "00", "value": "0x00 Void", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000064", "value": "100 us (0x00000064)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "00", "value": "0 words (0 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "02", "value": "SDM=0 Close=1 Routing=0", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "00", "value": "0x00 Void", "ref": "Stream 2.2 p11-12"}
+       ]
+      },
+      {
+       "label": "keep",
+       "source": "192.0.2.10:50000",
+       "at_us": 500000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0003", "value": "0x0003", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {"channel_0": "closed", "connection": "open", "output": "none (shutter closed)"}
+   },
+   {
+    "id": "seq-link-timeout",
+    "kind": "sequence",
+    "summary": "One packet, then silence",
+    "refs": ["Hello 7.2 p32 (link SHALL time out after 1 s)"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {"connection_closed_by_us": 1000000, "output_stopped": true}
+   },
+   {
+    "id": "seq-empty-close-no-connection",
+    "kind": "sequence",
+    "summary": "Empty close with ACK request as the first packet",
+    "refs": ["Hello 6.2.2 p22", "Hello 6.3.3 p25 (0xEB)"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "close",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "45", "value": "0x45 RT graceful close with ACK request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {"session": "none", "ack_result": "0xEB"}
+   },
+   {
+    "id": "seq-two-source-ports",
+    "kind": "sequence",
+    "summary": "Same host, two source ports",
+    "refs": ["Hello 7.1 p32 (5-tuple identifies a connection)"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "a",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "b",
+       "source": "192.0.2.10:50001",
+       "at_us": 10,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "41", "value": "0x41 RT channel message with ACK request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {"connections": 2, "if_single_session": "second link refused; ACK result 0xEC"}
+   },
+   {
+    "id": "seq-client-group-excluded",
+    "kind": "sequence",
+    "summary": "Exclude client group 1, then stream from group 1 with an ACK request",
+    "refs": ["Hello 3.2.1 p9-10", "Hello 6.1 p21", "Hello 6.3.3 p25 (0xED)"],
+    "interpretation": "normative",
+    "note": "Auth handling is device-configurable; a server with a non-empty code answers 0xFD instead.",
+    "steps": [
+      {
+       "label": "mask",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 20,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "0c", "value": "0x0C client group request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "cg.struct_size", "hex": "10", "value": "16 octets", "ref": "Hello 3.2.1 p9"},
+         {"offset": 5, "field": "cg.op_code", "hex": "02", "value": "set mask", "ref": "Hello 3.2.1 p10"},
+         {"offset": 6, "field": "cg.group_mask", "hex": "fffd", "value": "all groups except 1", "ref": "Hello 3.2.1 p10"},
+         {"offset": 8, "field": "cg.auth_code", "hex": "000000000000000000000000", "value": "empty auth code", "ref": "Hello 3.2.1 p10"}
+       ]
+      },
+      {
+       "label": "rt",
+       "source": "192.0.2.10:50001",
+       "at_us": 100,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "41", "value": "0x41 RT channel message with ACK request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "01", "value": "client group 1", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {"group_mask_after": "0xFFFD", "rt_processed": false, "ack_result": "0xED"}
+   },
+   {
+    "id": "seq-scm-mismatch-after-config",
+    "kind": "sequence",
+    "summary": "Route with SDM=1, then a wave chunk with SCM=2",
+    "refs": ["Stream 6.7 p43", "Hello 6.3.3 p29 (DCMErr)"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 88,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0054", "value": "84 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000000", "value": "0 us (0x00000000)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "02", "value": "2 words (8 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "11", "value": "SDM=1 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 20, "field": "dict[2]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 22, "field": "dict[3]", "hex": "0000", "value": "0x0000 Void (alignment)", "ref": "Stream 3.4.2 p17"},
+         {"offset": 24, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 25, "field": "wave.duration", "hex": "0007d0", "value": "2000 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 28, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 76, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 79, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 82, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 85, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 2000,
+       "length": 76,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0048", "value": "72 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "000007d0", "value": "2000 us (0x000007D0)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "20", "value": "SCM=2", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "0007d0", "value": "2000 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 16, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 19, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 22, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 25, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 28, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      }
+    ],
+    "expect": {
+     "p0": "output",
+     "p1": "dropped; configuration discarded; channel voided until a new configuration",
+     "ack_pipeline_flag": "DCMErr"
+    }
+   },
+   {
+    "id": "seq-data-on-closed-channel",
+    "kind": "sequence",
+    "summary": "Wave chunk without any prior routing",
+    "refs": ["Hello 6.3.3 p26 (CCErr)"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 76,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0048", "value": "72 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000000", "value": "0 us (0x00000000)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "0007d0", "value": "2000 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 16, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 19, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 22, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 25, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 28, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      }
+    ],
+    "expect": {"output": "none", "ack_input_flag": "CCErr"}
+   },
+   {
+    "id": "seq-replacement-config-invalid",
+    "kind": "sequence",
+    "summary": "Valid routing, then an invalid replacement configuration (no Y) 200 ms later",
+    "refs": ["Stream 2.2 p10 (changes not faster than 100 ms)", "Hello 6.3.3 p29 (CFGErr)"],
+    "interpretation": "project",
+    "note": "Plan 01 transactional compilation: a failed replacement must not leave a half-built decoder; whether the old layout survives is plan 02's decision, but p1's samples are never decoded with it.",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 88,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0054", "value": "84 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000000", "value": "0 us (0x00000000)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "02", "value": "2 words (8 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 20, "field": "dict[2]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 22, "field": "dict[3]", "hex": "0000", "value": "0x0000 Void (alignment)", "ref": "Stream 3.4.2 p17"},
+         {"offset": 24, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 25, "field": "wave.duration", "hex": "0007d0", "value": "2000 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 28, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 76, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 79, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 82, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 85, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 200000,
+       "length": 88,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0054", "value": "84 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00030d40", "value": "200000 us (0x00030D40)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "02", "value": "2 words (8 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4000", "value": "0x4000 NOP", "ref": "Stream 3.4.5 p20"},
+         {"offset": 20, "field": "dict[2]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 22, "field": "dict[3]", "hex": "0000", "value": "0x0000 Void (alignment)", "ref": "Stream 3.4.2 p17"},
+         {"offset": 24, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 25, "field": "wave.duration", "hex": "0007d0", "value": "2000 us", "ref": "Stream 6.1 p38-39"},
+         {"offset": 28, "field": "sample[0]", "hex": "000000", "value": "X=0 Y=0 G=0x00 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 31, "field": "sample[1]", "hex": "01ff80", "value": "X=1 Y=-1 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 34, "field": "sample[2]", "hex": "02fe80", "value": "X=2 Y=-2 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 37, "field": "sample[3]", "hex": "03fd80", "value": "X=3 Y=-3 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 40, "field": "sample[4]", "hex": "04fc80", "value": "X=4 Y=-4 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 43, "field": "sample[5]", "hex": "05fb80", "value": "X=5 Y=-5 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 46, "field": "sample[6]", "hex": "06fa80", "value": "X=6 Y=-6 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 49, "field": "sample[7]", "hex": "07f980", "value": "X=7 Y=-7 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 52, "field": "sample[8]", "hex": "08f880", "value": "X=8 Y=-8 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 55, "field": "sample[9]", "hex": "09f780", "value": "X=9 Y=-9 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 58, "field": "sample[10]", "hex": "0af680", "value": "X=10 Y=-10 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 61, "field": "sample[11]", "hex": "0bf580", "value": "X=11 Y=-11 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 64, "field": "sample[12]", "hex": "0cf480", "value": "X=12 Y=-12 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 67, "field": "sample[13]", "hex": "0df380", "value": "X=13 Y=-13 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 70, "field": "sample[14]", "hex": "0ef280", "value": "X=14 Y=-14 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 73, "field": "sample[15]", "hex": "0ff180", "value": "X=15 Y=-15 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 76, "field": "sample[16]", "hex": "10f080", "value": "X=16 Y=-16 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 79, "field": "sample[17]", "hex": "11ef80", "value": "X=17 Y=-17 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 82, "field": "sample[18]", "hex": "12ee80", "value": "X=18 Y=-18 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"},
+         {"offset": 85, "field": "sample[19]", "hex": "13ed80", "value": "X=19 Y=-19 G=0x80 (8-bit, left aligned)", "ref": "Stream 6.1 p38; dictionary order"}
+       ]
+      }
+    ],
+    "expect": {"p0": "output", "p1": "no output with either layout", "ack_pipeline_flag": "CFGErr"}
+   },
+   {
+    "id": "seq-ack-accumulation",
+    "kind": "sequence",
+    "summary": "Sequence gap, then ACK request reports and clears it",
+    "refs": ["Hello 6.3.3 p26 (events cleared after ACK)"],
+    "interpretation": "normative",
+    "steps": [
+      {
+       "label": "p0",
+       "source": "192.0.2.10:50000",
+       "at_us": 0,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "p1",
+       "source": "192.0.2.10:50000",
+       "at_us": 1000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "ack1",
+       "source": "192.0.2.10:50000",
+       "at_us": 2000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "41", "value": "0x41 RT channel message with ACK request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0008", "value": "0x0008", "ref": "Hello 2.1 p7"}
+       ]
+      },
+      {
+       "label": "ack2",
+       "source": "192.0.2.10:50000",
+       "at_us": 3000,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "41", "value": "0x41 RT channel message with ACK request", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {"ack1_input_flags_include": "SeqErr missing", "ack2_input_flags": "0x0000"}
+   }
+ ]
+}

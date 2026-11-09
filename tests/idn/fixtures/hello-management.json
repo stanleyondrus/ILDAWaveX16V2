@@ -1,0 +1,425 @@
+{
+ "schema": "idn-fixtures/1",
+ "family": "hello-management",
+ "description": "IDN-Hello ping, scan, service map and short datagrams",
+ "sources": {
+  "Stream": {
+   "title": "The ILDA Digital Network - Stream Specification",
+   "identifier": "IDN-Stream",
+   "revision": "Revision 002, July 2025",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/ILDA-IDN-Stream-rev002.pdf (untracked; not redistributed in this repository)"
+  },
+  "Hello": {
+   "title": "The ILDA Digital Network - Hello Protocol Specification",
+   "identifier": "IDN-Hello",
+   "revision": "Draft 2022-03-27 (not yet adopted by ILDA)",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/IDN-Hello-2022-03-27-draft.pdf (untracked; not redistributed in this repository)"
+  }
+ },
+ "fixtures": [
+   {
+    "id": "ping-req-empty",
+    "kind": "datagram",
+    "direction": "client-to-server",
+    "summary": "Ping request with empty payload",
+    "refs": ["Hello 2.1 p5", "Hello 3.1.1 p8"],
+    "interpretation": "normative",
+    "length": 4,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "08", "value": "0x08 ping request", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+    ],
+    "expect": {"outcome": "respond", "response": "ping-resp-empty"}
+   },
+   {
+    "id": "ping-resp-empty",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Ping response echoing an empty payload",
+    "refs": ["Hello 3.1.2 p8"],
+    "interpretation": "normative",
+    "length": 4,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "09", "value": "0x09 ping response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"}
+    ],
+    "expect": {"outcome": "parse_ok", "request": "ping-req-empty", "echo_ok": true}
+   },
+   {
+    "id": "ping-req-payload",
+    "kind": "datagram",
+    "direction": "client-to-server",
+    "summary": "Ping request, client group 3, four payload octets",
+    "refs": ["Hello 2.1 p6-7", "Hello 3.1.1 p8"],
+    "interpretation": "normative",
+    "length": 8,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "08", "value": "0x08 ping request", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "03", "value": "client group 3", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "1234", "value": "0x1234", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ping.payload", "hex": "deadbeef", "value": "arbitrary payload", "ref": "Hello 3.1 p8"}
+    ],
+    "expect": {"outcome": "respond", "response": "ping-resp-payload", "group_copied": 3, "sequence_copied": 4660}
+   },
+   {
+    "id": "ping-resp-payload",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Ping response: exact copy of payload, group and sequence copied",
+    "refs": ["Hello 2.1 p7", "Hello 3.1.2 p8"],
+    "interpretation": "normative",
+    "length": 8,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "09", "value": "0x09 ping response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "03", "value": "client group 3", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "1234", "value": "0x1234", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ping.payload", "hex": "deadbeef", "value": "exact echo", "ref": "Hello 3.1.1 p8"}
+    ],
+    "expect": {"outcome": "parse_ok", "request": "ping-req-payload", "echo_ok": true}
+   },
+   {
+    "id": "ping-resp-short-echo",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Ping response with one payload octet missing",
+    "refs": ["Hello 3.1.2 p8"],
+    "interpretation": "normative",
+    "variation_of": "ping-resp-payload",
+    "varied": "payload length 4 -> 3",
+    "length": 7,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "09", "value": "0x09 ping response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "03", "value": "client group 3", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "1234", "value": "0x1234", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ping.payload", "hex": "deadbe", "value": "truncated echo", "ref": "Hello 3.1.1 p8"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "ping-req-payload", "reason": "echo-mismatch"}
+   },
+   {
+    "id": "ping-req-large-1600",
+    "kind": "datagram",
+    "direction": "client-to-server",
+    "summary": "Legal ping request whose UDP payload (1604 octets) exceeds 1500",
+    "refs": ["Hello 3.1 p8 (payload of arbitrary size)", "Hello 7 p32"],
+    "interpretation": "project",
+    "note": "Size limit is the transport's (UDP/IP reassembly); the 'no partial echo' rule is the plan 02 interpretation of Hello 3.1.1 'exact copy in content and length'.",
+    "length": 1604,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "08", "value": "0x08 ping request", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ping.payload", "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", "value": "1600 octets, value = offset & 0xFF", "ref": "Hello 3.1 p8"}
+    ],
+    "expect": {
+     "outcome": "respond",
+     "response_length": 1604,
+     "note": "receiver must echo all 1604 octets or nothing; a receive buffer shorter than the datagram must be detected as truncation, never echoed as complete"
+    }
+   },
+   {
+    "id": "scan-req",
+    "kind": "datagram",
+    "direction": "client-to-server",
+    "summary": "Scan request (no payload)",
+    "refs": ["Hello 4.1.1 p12"],
+    "interpretation": "normative",
+    "length": 4,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "10", "value": "0x10 scan request", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"}
+    ],
+    "expect": {"outcome": "respond", "response": "scan-resp-valid"}
+   },
+   {
+    "id": "scan-resp-valid",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Scan response with EUI-48 unit ID and host name",
+    "refs": ["Hello 4.1.2 p12-15"],
+    "interpretation": "normative",
+    "length": 44,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "11", "value": "0x11 scan response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "scan.struct_size", "hex": "28", "value": "40 octets", "ref": "Hello 4.1.2 p13"},
+      {"offset": 5, "field": "scan.protocol_version", "hex": "01", "value": "major 0, minor 1", "ref": "Hello 1.4 p4, 4.1.2 p13"},
+      {"offset": 6, "field": "scan.status", "hex": "01", "value": "RT=1 (IDN-RT offered)", "ref": "Hello 4.1.2 p13-14"},
+      {"offset": 7, "field": "scan.reserved", "hex": "00", "value": "0x00", "ref": "Hello 4.1.2 p13"},
+      {"offset": 8, "field": "scan.unit_id", "hex": "0701123456789abc0000000000000000", "value": "len 7, category 0x01 EUI-48, 12:34:56:78:9A:BC, zero padded", "ref": "Hello 4.1.2 p14-15"},
+      {"offset": 24, "field": "scan.host_name", "hex": "494c444157617665583136000000000000000000", "value": "'ILDAWaveX16', zero padded, unterminated UTF-8", "ref": "Hello 4.1.2 p15"}
+    ],
+    "expect": {
+     "outcome": "parse_ok",
+     "request": "scan-req",
+     "parsed": {
+      "struct_size": 40,
+      "protocol_version": "0.1",
+      "status": 1,
+      "realtime": true,
+      "malfunction": false,
+      "offline": false,
+      "excluded": false,
+      "occupied": false,
+      "unit_id": "01-123456789ABC",
+      "host_name": "ILDAWaveX16"
+     }
+    }
+   },
+   {
+    "id": "scan-resp-struct-too-small",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Scan response declaring a 32-octet struct",
+    "refs": ["Hello 4.1.2 p13 (struct size SHALL be checked)"],
+    "interpretation": "normative",
+    "variation_of": "scan-resp-valid",
+    "varied": "struct size 40 -> 32",
+    "length": 44,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "11", "value": "0x11 scan response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "scan.struct_size", "hex": "20", "value": "32 octets (too small)", "ref": "Hello 4.1.2 p13"},
+      {"offset": 5, "field": "scan.protocol_version", "hex": "01", "value": "major 0, minor 1", "ref": "Hello 1.4 p4, 4.1.2 p13"},
+      {"offset": 6, "field": "scan.status", "hex": "01", "value": "RT=1 (IDN-RT offered)", "ref": "Hello 4.1.2 p13-14"},
+      {"offset": 7, "field": "scan.reserved", "hex": "00", "value": "0x00", "ref": "Hello 4.1.2 p13"},
+      {"offset": 8, "field": "scan.unit_id", "hex": "0701123456789abc0000000000000000", "value": "len 7, category 0x01 EUI-48, 12:34:56:78:9A:BC, zero padded", "ref": "Hello 4.1.2 p14-15"},
+      {"offset": 24, "field": "scan.host_name", "hex": "494c444157617665583136000000000000000000", "value": "'ILDAWaveX16', zero padded, unterminated UTF-8", "ref": "Hello 4.1.2 p15"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "scan-req", "reason": "struct-size"}
+   },
+   {
+    "id": "scan-resp-truncated",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Scan response datagram shorter than its declared struct",
+    "refs": ["Hello 4.1.2 p13"],
+    "interpretation": "normative",
+    "variation_of": "scan-resp-valid",
+    "varied": "datagram 44 -> 30 octets",
+    "length": 30,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "11", "value": "0x11 scan response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "scan.struct_size", "hex": "28", "value": "40 octets", "ref": "Hello 4.1.2 p13"},
+      {"offset": 5, "field": "scan.protocol_version", "hex": "01", "value": "major 0, minor 1", "ref": "Hello 1.4 p4, 4.1.2 p13"},
+      {"offset": 6, "field": "scan.status", "hex": "01", "value": "RT=1 (IDN-RT offered)", "ref": "Hello 4.1.2 p13-14"},
+      {"offset": 7, "field": "scan.reserved", "hex": "00", "value": "0x00", "ref": "Hello 4.1.2 p13"},
+      {"offset": 8, "field": "scan.unit_id", "hex": "0701123456789abc0000000000000000", "value": "len 7, category 0x01 EUI-48, 12:34:56:78:9A:BC, zero padded", "ref": "Hello 4.1.2 p14-15"},
+      {"offset": 24, "field": "scan.host_name", "hex": "494c44415761", "value": "host name cut after 6 octets", "ref": "Hello 4.1.2 p13"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "scan-req", "reason": "truncated"}
+   },
+   {
+    "id": "scan-resp-wrong-sequence",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Scan response whose sequence does not match the request",
+    "refs": ["Hello 2.1 p7"],
+    "interpretation": "normative",
+    "variation_of": "scan-resp-valid",
+    "varied": "sequence 0x0007 -> 0x0008",
+    "length": 44,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "11", "value": "0x11 scan response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0008", "value": "0x0008", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "scan.struct_size", "hex": "28", "value": "40 octets", "ref": "Hello 4.1.2 p13"},
+      {"offset": 5, "field": "scan.protocol_version", "hex": "01", "value": "major 0, minor 1", "ref": "Hello 1.4 p4, 4.1.2 p13"},
+      {"offset": 6, "field": "scan.status", "hex": "01", "value": "RT=1 (IDN-RT offered)", "ref": "Hello 4.1.2 p13-14"},
+      {"offset": 7, "field": "scan.reserved", "hex": "00", "value": "0x00", "ref": "Hello 4.1.2 p13"},
+      {"offset": 8, "field": "scan.unit_id", "hex": "0701123456789abc0000000000000000", "value": "len 7, category 0x01 EUI-48, 12:34:56:78:9A:BC, zero padded", "ref": "Hello 4.1.2 p14-15"},
+      {"offset": 24, "field": "scan.host_name", "hex": "494c444157617665583136000000000000000000", "value": "'ILDAWaveX16', zero padded, unterminated UTF-8", "ref": "Hello 4.1.2 p15"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "scan-req", "reason": "sequence"}
+   },
+   {
+    "id": "scan-resp-wrong-group",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Scan response whose client group does not match the request",
+    "refs": ["Hello 2.1 p7"],
+    "interpretation": "normative",
+    "variation_of": "scan-resp-valid",
+    "varied": "client group 0 -> 2",
+    "length": 44,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "11", "value": "0x11 scan response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "02", "value": "client group 2", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0007", "value": "0x0007", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "scan.struct_size", "hex": "28", "value": "40 octets", "ref": "Hello 4.1.2 p13"},
+      {"offset": 5, "field": "scan.protocol_version", "hex": "01", "value": "major 0, minor 1", "ref": "Hello 1.4 p4, 4.1.2 p13"},
+      {"offset": 6, "field": "scan.status", "hex": "01", "value": "RT=1 (IDN-RT offered)", "ref": "Hello 4.1.2 p13-14"},
+      {"offset": 7, "field": "scan.reserved", "hex": "00", "value": "0x00", "ref": "Hello 4.1.2 p13"},
+      {"offset": 8, "field": "scan.unit_id", "hex": "0701123456789abc0000000000000000", "value": "len 7, category 0x01 EUI-48, 12:34:56:78:9A:BC, zero padded", "ref": "Hello 4.1.2 p14-15"},
+      {"offset": 24, "field": "scan.host_name", "hex": "494c444157617665583136000000000000000000", "value": "'ILDAWaveX16', zero padded, unterminated UTF-8", "ref": "Hello 4.1.2 p15"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "scan-req", "reason": "group"}
+   },
+   {
+    "id": "svcmap-req",
+    "kind": "datagram",
+    "direction": "client-to-server",
+    "summary": "Service map request (no payload)",
+    "refs": ["Hello 4.2.1 p16"],
+    "interpretation": "normative",
+    "length": 4,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "12", "value": "0x12 service map request", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"}
+    ],
+    "expect": {"outcome": "respond", "response": "svcmap-resp-one-service"}
+   },
+   {
+    "id": "svcmap-resp-one-service",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Service map with one default laser projector service",
+    "refs": ["Hello 4.2.2-4.2.3 p16-18"],
+    "interpretation": "normative",
+    "length": 32,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "13", "value": "0x13 service map response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "svcmap.struct_size", "hex": "04", "value": "4 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 5, "field": "svcmap.entry_size", "hex": "18", "value": "24 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 6, "field": "svcmap.relay_count", "hex": "00", "value": "0", "ref": "Hello 4.2.2 p16"},
+      {"offset": 7, "field": "svcmap.service_count", "hex": "01", "value": "1", "ref": "Hello 4.2.2 p16"},
+      {"offset": 8, "field": "service[0].service_id", "hex": "01", "value": "1", "ref": "Hello 4.2.3 p17"},
+      {"offset": 9, "field": "service[0].service_type", "hex": "80", "value": "0x80 standard laser projector", "ref": "Hello 4.2.3 p17, Stream 1.2 p4"},
+      {"offset": 10, "field": "service[0].flags", "hex": "01", "value": "DSID=1 (default service)", "ref": "Hello 4.2.3 p17-18"},
+      {"offset": 11, "field": "service[0].relay_number", "hex": "00", "value": "0 = root service", "ref": "Hello 4.2.3 p18"},
+      {"offset": 12, "field": "service[0].name", "hex": "6c61736572000000000000000000000000000000", "value": "'laser'", "ref": "Hello 4.2.3 p18"}
+    ],
+    "expect": {
+     "outcome": "parse_ok",
+     "request": "svcmap-req",
+     "parsed": {
+      "relays": [],
+      "services": [
+        {"service_id": 1, "service_type": 128, "default": true, "relay_number": 0, "name": "laser"}
+      ]
+     }
+    }
+   },
+   {
+    "id": "svcmap-resp-count-overflow",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Service map declaring two services but carrying one",
+    "refs": ["Hello 4.2.2 p16"],
+    "interpretation": "normative",
+    "variation_of": "svcmap-resp-one-service",
+    "varied": "service count 1 -> 2",
+    "length": 32,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "13", "value": "0x13 service map response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "svcmap.struct_size", "hex": "04", "value": "4 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 5, "field": "svcmap.entry_size", "hex": "18", "value": "24 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 6, "field": "svcmap.relay_count", "hex": "00", "value": "0", "ref": "Hello 4.2.2 p16"},
+      {"offset": 7, "field": "svcmap.service_count", "hex": "02", "value": "2", "ref": "Hello 4.2.2 p16"},
+      {"offset": 8, "field": "service[0].service_id", "hex": "01", "value": "1", "ref": "Hello 4.2.3 p17"},
+      {"offset": 9, "field": "service[0].service_type", "hex": "80", "value": "0x80 standard laser projector", "ref": "Hello 4.2.3 p17, Stream 1.2 p4"},
+      {"offset": 10, "field": "service[0].flags", "hex": "01", "value": "DSID=1 (default service)", "ref": "Hello 4.2.3 p17-18"},
+      {"offset": 11, "field": "service[0].relay_number", "hex": "00", "value": "0 = root service", "ref": "Hello 4.2.3 p18"},
+      {"offset": 12, "field": "service[0].name", "hex": "6c61736572000000000000000000000000000000", "value": "'laser'", "ref": "Hello 4.2.3 p18"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "svcmap-req", "reason": "truncated"}
+   },
+   {
+    "id": "svcmap-resp-relay",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Service map with one relay and one service behind it",
+    "refs": ["Hello 4.2.2-4.2.3 p16-18"],
+    "interpretation": "normative",
+    "length": 56,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "13", "value": "0x13 service map response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "svcmap.struct_size", "hex": "04", "value": "4 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 5, "field": "svcmap.entry_size", "hex": "18", "value": "24 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 6, "field": "svcmap.relay_count", "hex": "01", "value": "1", "ref": "Hello 4.2.2 p16"},
+      {"offset": 7, "field": "svcmap.service_count", "hex": "01", "value": "1", "ref": "Hello 4.2.2 p16"},
+      {"offset": 8, "field": "relay[0].service_id", "hex": "00", "value": "must be 0 for relays", "ref": "Hello 4.2.3 p17"},
+      {"offset": 9, "field": "relay[0].service_type", "hex": "00", "value": "must be 0 for relays", "ref": "Hello 4.2.3 p17"},
+      {"offset": 10, "field": "relay[0].flags", "hex": "00", "value": "0", "ref": "Hello 4.2.3 p17"},
+      {"offset": 11, "field": "relay[0].relay_number", "hex": "01", "value": "relay 1", "ref": "Hello 4.2.3 p18"},
+      {"offset": 12, "field": "relay[0].name", "hex": "6661722d686f7374000000000000000000000000", "value": "'far-host'", "ref": "Hello 4.2.3 p18"},
+      {"offset": 32, "field": "service[0].service_id", "hex": "02", "value": "2", "ref": "Hello 4.2.3 p17"},
+      {"offset": 33, "field": "service[0].service_type", "hex": "80", "value": "0x80 standard laser projector", "ref": "Hello 4.2.3 p17"},
+      {"offset": 34, "field": "service[0].flags", "hex": "00", "value": "DSID=0", "ref": "Hello 4.2.3 p17"},
+      {"offset": 35, "field": "service[0].relay_number", "hex": "01", "value": "behind relay 1", "ref": "Hello 4.2.3 p18"},
+      {"offset": 36, "field": "service[0].name", "hex": "6661720000000000000000000000000000000000", "value": "'far'", "ref": "Hello 4.2.3 p18"}
+    ],
+    "expect": {
+     "outcome": "parse_ok",
+     "request": "svcmap-req",
+     "parsed": {
+      "relays": [
+        {"relay_number": 1, "name": "far-host"}
+      ],
+      "services": [
+        {"service_id": 2, "service_type": 128, "default": false, "relay_number": 1, "name": "far"}
+      ]
+     }
+    }
+   },
+   {
+    "id": "svcmap-resp-unknown-relay",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "Service entry referencing a relay that is not in the relay table",
+    "refs": ["Hello 4.2.3 p18"],
+    "interpretation": "normative",
+    "variation_of": "svcmap-resp-relay",
+    "varied": "service relay number 1 -> 2",
+    "length": 56,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "13", "value": "0x13 service map response", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "svcmap.struct_size", "hex": "04", "value": "4 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 5, "field": "svcmap.entry_size", "hex": "18", "value": "24 octets", "ref": "Hello 4.2.2 p16"},
+      {"offset": 6, "field": "svcmap.relay_count", "hex": "01", "value": "1", "ref": "Hello 4.2.2 p16"},
+      {"offset": 7, "field": "svcmap.service_count", "hex": "01", "value": "1", "ref": "Hello 4.2.2 p16"},
+      {"offset": 8, "field": "relay[0].service_id", "hex": "00", "value": "must be 0 for relays", "ref": "Hello 4.2.3 p17"},
+      {"offset": 9, "field": "relay[0].service_type", "hex": "00", "value": "must be 0 for relays", "ref": "Hello 4.2.3 p17"},
+      {"offset": 10, "field": "relay[0].flags", "hex": "00", "value": "0", "ref": "Hello 4.2.3 p17"},
+      {"offset": 11, "field": "relay[0].relay_number", "hex": "01", "value": "relay 1", "ref": "Hello 4.2.3 p18"},
+      {"offset": 12, "field": "relay[0].name", "hex": "6661722d686f7374000000000000000000000000", "value": "'far-host'", "ref": "Hello 4.2.3 p18"},
+      {"offset": 32, "field": "service[0].service_id", "hex": "02", "value": "2", "ref": "Hello 4.2.3 p17"},
+      {"offset": 33, "field": "service[0].service_type", "hex": "80", "value": "0x80 standard laser projector", "ref": "Hello 4.2.3 p17"},
+      {"offset": 34, "field": "service[0].flags", "hex": "00", "value": "DSID=0", "ref": "Hello 4.2.3 p17"},
+      {"offset": 35, "field": "service[0].relay_number", "hex": "02", "value": "relay 2 (not in relay table)", "ref": "Hello 4.2.3 p18"},
+      {"offset": 36, "field": "service[0].name", "hex": "6661720000000000000000000000000000000000", "value": "'far'", "ref": "Hello 4.2.3 p18"}
+    ],
+    "expect": {"outcome": "parse_error", "request": "svcmap-req", "reason": "relay-number"}
+   },
+   {
+    "id": "datagram-3-octets",
+    "kind": "datagram",
+    "direction": "client-to-server",
+    "summary": "Datagram shorter than the four-octet Hello header",
+    "refs": ["Hello 2.1 p5 (smaller datagrams SHALL be discarded)"],
+    "interpretation": "normative",
+    "length": 3,
+    "segments": [
+      {"offset": 0, "field": "partial.header", "hex": "400000", "value": "command, flags, half a sequence", "ref": "Hello 2.1 p5"}
+    ],
+    "expect": {"outcome": "discard", "session": "none"}
+   }
+ ]
+}

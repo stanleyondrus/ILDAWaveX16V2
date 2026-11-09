@@ -1,0 +1,191 @@
+{
+ "schema": "idn-fixtures/1",
+ "family": "batching",
+ "description": "Pure batching, capacity and cumulative timing expectations",
+ "sources": {
+  "Stream": {
+   "title": "The ILDA Digital Network - Stream Specification",
+   "identifier": "IDN-Stream",
+   "revision": "Revision 002, July 2025",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/ILDA-IDN-Stream-rev002.pdf (untracked; not redistributed in this repository)"
+  },
+  "Hello": {
+   "title": "The ILDA Digital Network - Hello Protocol Specification",
+   "identifier": "IDN-Hello",
+   "revision": "Draft 2022-03-27 (not yet adopted by ILDA)",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/IDN-Hello-2022-03-27-draft.pdf (untracked; not redistributed in this repository)"
+  }
+ },
+ "fixtures": [
+   {
+    "id": "batching-plan",
+    "kind": "table",
+    "summary": "Batch sizes for finite input: nominal preference vs capacity, 20-sample minimum, tail repartition",
+    "refs": ["Stream 6.1 p38"],
+    "interpretation": "project",
+    "note": "Repartition rule: if the final remainder is below 20, the last full batch donates samples so the final batch has exactly 20; if that would leave the donor below 20, the donor and the remainder merge into one final batch when within capacity.",
+    "cases": [
+      {"total": 19, "preferred": 64, "capacity": 179, "minimum": 20, "expect_error": "below-minimum"},
+      {
+       "total": 20,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [20]
+      },
+      {
+       "total": 39,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [39]
+      },
+      {
+       "total": 40,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [40]
+      },
+      {
+       "total": 64,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [64]
+      },
+      {
+       "total": 65,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [45, 20]
+      },
+      {
+       "total": 84,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [64, 20]
+      },
+      {
+       "total": 128,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [64, 64]
+      },
+      {
+       "total": 129,
+       "preferred": 64,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [64, 45, 20]
+      },
+      {
+       "total": 179,
+       "preferred": 179,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [179]
+      },
+      {
+       "total": 180,
+       "preferred": 179,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [160, 20]
+      },
+      {
+       "total": 39,
+       "preferred": 20,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [39]
+      },
+      {
+       "total": 41,
+       "preferred": 20,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [20, 21]
+      },
+      {
+       "total": 358,
+       "preferred": 179,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [179, 179]
+      },
+      {
+       "total": 359,
+       "preferred": 179,
+       "capacity": 179,
+       "minimum": 20,
+       "expect": [179, 160, 20]
+      }
+    ]
+   },
+   {
+    "id": "packet-capacity",
+    "kind": "table",
+    "summary": "Samples per datagram for the 8-octet XYRGBI layout under a UDP payload budget",
+    "refs": ["Stream 2.1 p7 (total size <= 0xFF00)", "Hello 7 p32 (avoid IP fragmentation for continuous streams)"],
+    "interpretation": "normative",
+    "cases": [
+      {
+       "budget": 1472,
+       "sample_bytes": 8,
+       "dictionary_bytes": 16,
+       "expect_with_config": 179,
+       "expect_without_config": 182,
+       "note": "4 Hello + 8 message + 4 config + 16 dictionary + 4 wave = 36; (1472-36)//8 = 179. Without config 16 overhead; (1472-16)//8 = 182"
+      },
+      {
+       "budget": 196,
+       "sample_bytes": 8,
+       "dictionary_bytes": 16,
+       "expect_with_config": 20,
+       "expect_without_config": 22
+      },
+      {"budget": 195, "sample_bytes": 8, "dictionary_bytes": 16, "expect_error": "budget-below-minimum-chunk"}
+    ]
+   },
+   {
+    "id": "cumulative-timing",
+    "kind": "table",
+    "summary": "Cumulative integer boundaries: offset_k = floor(n_k * 1e6 / pps); duration = next boundary - this boundary",
+    "refs": ["Stream 6.1 p38-39 (timestamp + duration = next timestamp)"],
+    "interpretation": "project",
+    "note": "Stream 6.1 requires exact continuity and lets count and duration both be adjusted; flooring a cumulative boundary is this sender's choice for spreading fractional microseconds.",
+    "cases": [
+      {
+       "pps": 30000,
+       "batches": [20, 20, 20],
+       "expect_offsets_us": [0, 666, 1333],
+       "expect_durations_us": [666, 667, 667]
+      },
+      {
+       "pps": 30000,
+       "batches": [45, 20],
+       "expect_offsets_us": [0, 1500],
+       "expect_durations_us": [1500, 666]
+      },
+      {
+       "pps": 48000,
+       "batches": [100, 100, 100],
+       "expect_offsets_us": [0, 2083, 4166],
+       "expect_durations_us": [2083, 2083, 2084]
+      },
+      {
+       "pps": 1000,
+       "batches": [50, 50],
+       "expect_offsets_us": [0, 50000],
+       "expect_durations_us": [50000, 50000]
+      }
+    ]
+   }
+ ]
+}

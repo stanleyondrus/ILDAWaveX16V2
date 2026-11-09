@@ -1,0 +1,173 @@
+{
+ "schema": "idn-fixtures/1",
+ "family": "rt-ack",
+ "description": "IDN-RT acknowledgement responses",
+ "sources": {
+  "Stream": {
+   "title": "The ILDA Digital Network - Stream Specification",
+   "identifier": "IDN-Stream",
+   "revision": "Revision 002, July 2025",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/ILDA-IDN-Stream-rev002.pdf (untracked; not redistributed in this repository)"
+  },
+  "Hello": {
+   "title": "The ILDA Digital Network - Hello Protocol Specification",
+   "identifier": "IDN-Hello",
+   "revision": "Draft 2022-03-27 (not yet adopted by ILDA)",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/IDN-Hello-2022-03-27-draft.pdf (untracked; not redistributed in this repository)"
+  }
+ },
+ "fixtures": [
+   {
+    "id": "ack-success-new-routed",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "ACK: success, new connection, channel routed, session has messages and open channels",
+    "refs": ["Hello 6.3.3 p24-31"],
+    "interpretation": "normative",
+    "length": 16,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "47", "value": "0x47 RT acknowledge", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ack.struct_size", "hex": "0c", "value": "12 octets", "ref": "Hello 6.3.3 p25"},
+      {"offset": 5, "field": "ack.result_code", "hex": "00", "value": "0x00 success", "ref": "Hello 6.3.3 p25"},
+      {"offset": 6, "field": "ack.input_event_flags", "hex": "0001", "value": "0x0001", "ref": "Hello 6.3.3 p26-28"},
+      {"offset": 8, "field": "ack.pipeline_event_flags", "hex": "0001", "value": "0x0001", "ref": "Hello 6.3.3 p28-30"},
+      {"offset": 10, "field": "ack.status_flags", "hex": "05", "value": "0x05", "ref": "Hello 6.3.3 p30-31"},
+      {"offset": 11, "field": "ack.link_quality", "hex": "00", "value": "0", "ref": "Hello 6.3.3 p31"},
+      {"offset": 12, "field": "ack.latency", "hex": "00000000", "value": "0 us", "ref": "Hello 6.3.3 p31"}
+    ],
+    "expect": {
+     "outcome": "parse_ok",
+     "request_sequence": 5,
+     "parsed": {
+      "struct_size": 12,
+      "result_code": 0,
+      "input_events": ["New"],
+      "pipeline_events": ["CnlRted"],
+      "status": ["SNMsg", "SOCnl"],
+      "link_quality": 0,
+      "latency_us": 0
+     }
+    }
+   },
+   {
+    "id": "ack-eb-close-without-connection",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "ACK result 0xEB: empty close when no connection exists; channel closed (static)",
+    "refs": ["Hello 6.2.2 p22", "Hello 6.3.3 p25, p30"],
+    "interpretation": "normative",
+    "length": 16,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "47", "value": "0x47 RT acknowledge", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0006", "value": "0x0006", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ack.struct_size", "hex": "0c", "value": "12 octets", "ref": "Hello 6.3.3 p25"},
+      {"offset": 5, "field": "ack.result_code", "hex": "eb", "value": "0xEB empty close without connection", "ref": "Hello 6.3.3 p25"},
+      {"offset": 6, "field": "ack.input_event_flags", "hex": "0000", "value": "0x0000", "ref": "Hello 6.3.3 p26-28"},
+      {"offset": 8, "field": "ack.pipeline_event_flags", "hex": "0002", "value": "0x0002", "ref": "Hello 6.3.3 p28-30"},
+      {"offset": 10, "field": "ack.status_flags", "hex": "00", "value": "0x00", "ref": "Hello 6.3.3 p30-31"},
+      {"offset": 11, "field": "ack.link_quality", "hex": "00", "value": "0", "ref": "Hello 6.3.3 p31"},
+      {"offset": 12, "field": "ack.latency", "hex": "00000000", "value": "0 us", "ref": "Hello 6.3.3 p31"}
+    ],
+    "expect": {
+     "outcome": "parse_ok",
+     "request_sequence": 6,
+     "parsed": {
+      "struct_size": 12,
+      "result_code": 235,
+      "input_events": [],
+      "pipeline_events": ["CnlClsd"],
+      "status": [],
+      "link_quality": 0,
+      "latency_us": 0
+     },
+     "sender_close_semantics": "already-closed (not an error)"
+    }
+   },
+   {
+    "id": "ack-seqerr-gap",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "ACK reporting a missing-sequence error and CTYErr",
+    "refs": ["Hello 6.3.3 p26-29"],
+    "interpretation": "normative",
+    "length": 16,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "47", "value": "0x47 RT acknowledge", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0009", "value": "0x0009", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ack.struct_size", "hex": "0c", "value": "12 octets", "ref": "Hello 6.3.3 p25"},
+      {"offset": 5, "field": "ack.result_code", "hex": "00", "value": "0x00 success", "ref": "Hello 6.3.3 p25"},
+      {"offset": 6, "field": "ack.input_event_flags", "hex": "0040", "value": "0x0040", "ref": "Hello 6.3.3 p26-28"},
+      {"offset": 8, "field": "ack.pipeline_event_flags", "hex": "0400", "value": "0x0400", "ref": "Hello 6.3.3 p28-30"},
+      {"offset": 10, "field": "ack.status_flags", "hex": "07", "value": "0x07", "ref": "Hello 6.3.3 p30-31"},
+      {"offset": 11, "field": "ack.link_quality", "hex": "c8", "value": "200", "ref": "Hello 6.3.3 p31"},
+      {"offset": 12, "field": "ack.latency", "hex": "00002ee0", "value": "12000 us", "ref": "Hello 6.3.3 p31"}
+    ],
+    "expect": {
+     "outcome": "parse_ok",
+     "request_sequence": 9,
+     "parsed": {
+      "struct_size": 12,
+      "result_code": 0,
+      "input_events": ["SeqErr:missing"],
+      "pipeline_events": ["CTYErr"],
+      "status": ["SNMsg", "DOBuf", "SOCnl"],
+      "link_quality": 200,
+      "latency_us": 12000
+     }
+    }
+   },
+   {
+    "id": "ack-struct-too-small",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "ACK declaring and carrying an 8-octet struct",
+    "refs": ["Hello 6.3.3 p25 (struct size SHALL be checked)"],
+    "interpretation": "normative",
+    "variation_of": "ack-success-new-routed",
+    "varied": "struct 12 -> 8, latency removed",
+    "length": 12,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "47", "value": "0x47 RT acknowledge", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0005", "value": "0x0005", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ack.struct_size", "hex": "08", "value": "8 octets", "ref": "Hello 6.3.3 p25"},
+      {"offset": 5, "field": "ack.result_code", "hex": "00", "value": "0x00 success", "ref": "Hello 6.3.3 p25"},
+      {"offset": 6, "field": "ack.input_event_flags", "hex": "0000", "value": "0x0000", "ref": "Hello 6.3.3 p26-28"},
+      {"offset": 8, "field": "ack.pipeline_event_flags", "hex": "0000", "value": "0x0000", "ref": "Hello 6.3.3 p28-30"},
+      {"offset": 10, "field": "ack.status_flags", "hex": "00", "value": "0x00", "ref": "Hello 6.3.3 p30-31"},
+      {"offset": 11, "field": "ack.link_quality", "hex": "00", "value": "0", "ref": "Hello 6.3.3 p31"}
+    ],
+    "expect": {"outcome": "parse_error", "request_sequence": 5, "reason": "struct-size"}
+   },
+   {
+    "id": "ack-wrong-sequence",
+    "kind": "datagram",
+    "direction": "server-to-client",
+    "summary": "ACK whose sequence does not match the request",
+    "refs": ["Hello 6.3.1 p24"],
+    "interpretation": "normative",
+    "variation_of": "ack-success-new-routed",
+    "varied": "sequence 5 -> 4",
+    "length": 16,
+    "segments": [
+      {"offset": 0, "field": "hello.command", "hex": "47", "value": "0x47 RT acknowledge", "ref": "Hello 2.1 p5-6"},
+      {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+      {"offset": 2, "field": "hello.sequence", "hex": "0004", "value": "0x0004", "ref": "Hello 2.1 p7"},
+      {"offset": 4, "field": "ack.struct_size", "hex": "0c", "value": "12 octets", "ref": "Hello 6.3.3 p25"},
+      {"offset": 5, "field": "ack.result_code", "hex": "00", "value": "0x00 success", "ref": "Hello 6.3.3 p25"},
+      {"offset": 6, "field": "ack.input_event_flags", "hex": "0001", "value": "0x0001", "ref": "Hello 6.3.3 p26-28"},
+      {"offset": 8, "field": "ack.pipeline_event_flags", "hex": "0001", "value": "0x0001", "ref": "Hello 6.3.3 p28-30"},
+      {"offset": 10, "field": "ack.status_flags", "hex": "05", "value": "0x05", "ref": "Hello 6.3.3 p30-31"},
+      {"offset": 11, "field": "ack.link_quality", "hex": "00", "value": "0", "ref": "Hello 6.3.3 p31"},
+      {"offset": 12, "field": "ack.latency", "hex": "00000000", "value": "0 us", "ref": "Hello 6.3.3 p31"}
+    ],
+    "expect": {"outcome": "parse_error", "request_sequence": 5, "reason": "sequence"}
+   }
+ ]
+}

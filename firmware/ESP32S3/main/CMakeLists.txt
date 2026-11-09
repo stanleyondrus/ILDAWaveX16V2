@@ -18,6 +18,9 @@ set(COMMON_SRCS
     "protocol_settings.c"
     "etherdream_protocol.c"
     "idn_protocol.c"
+    "idn_decoder.c"
+    "idn_session.c"
+    "idn_timing.c"
     "ilw_protocol.c"
 )
 
