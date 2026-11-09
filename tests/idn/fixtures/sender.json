@@ -1,0 +1,449 @@
+{
+ "schema": "idn-fixtures/1",
+ "family": "sender",
+ "description": "Expected sender output for given inputs (bytes literal; referenced packets live in rt-stream-valid.json)",
+ "sources": {
+  "Stream": {
+   "title": "The ILDA Digital Network - Stream Specification",
+   "identifier": "IDN-Stream",
+   "revision": "Revision 002, July 2025",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/ILDA-IDN-Stream-rev002.pdf (untracked; not redistributed in this repository)"
+  },
+  "Hello": {
+   "title": "The ILDA Digital Network - Hello Protocol Specification",
+   "identifier": "IDN-Hello",
+   "revision": "Draft 2022-03-27 (not yet adopted by ILDA)",
+   "publisher": "International Laser Display Association (ILDA), Technical Committee",
+   "local_copy": "docs/IDN-Hello-2022-03-27-draft.pdf (untracked; not redistributed in this repository)"
+  }
+ },
+ "fixtures": [
+   {
+    "id": "sender-xyrgbi-40-at-30k",
+    "kind": "sender-sequence",
+    "summary": "40 literal points at 30 kpps, 20 points per packet, finite (no loop), then graceful close",
+    "refs": ["Stream 2.2 p10-11", "Stream 6.1 p38", "Hello 6 p20 (never send ahead of timestamps)"],
+    "interpretation": "normative",
+    "sender": {
+     "pps": 30000,
+     "packet_points": 20,
+     "channel": 0,
+     "service_id": 0,
+     "sdm": 0,
+     "group": 0,
+     "first_seq": 4660,
+     "ts_base": 0,
+     "budget": 1472,
+     "lead_in": false,
+     "input_points": [
+       [0, 0, 0, 0, 0, 0],
+       [256, -256, 65535, 32896, 0, 65535],
+       [512, -512, 65535, 32896, 0, 65535],
+       [768, -768, 65535, 32896, 0, 65535],
+       [1024, -1024, 65535, 32896, 0, 65535],
+       [1280, -1280, 65535, 32896, 0, 65535],
+       [1536, -1536, 65535, 32896, 0, 65535],
+       [1792, -1792, 65535, 32896, 0, 65535],
+       [2048, -2048, 65535, 32896, 0, 65535],
+       [2304, -2304, 65535, 32896, 0, 65535],
+       [2560, -2560, 65535, 32896, 0, 65535],
+       [2816, -2816, 65535, 32896, 0, 65535],
+       [3072, -3072, 65535, 32896, 0, 65535],
+       [3328, -3328, 65535, 32896, 0, 65535],
+       [3584, -3584, 65535, 32896, 0, 65535],
+       [3840, -3840, 65535, 32896, 0, 65535],
+       [4096, -4096, 65535, 32896, 0, 65535],
+       [4352, -4352, 65535, 32896, 0, 65535],
+       [4608, -4608, 65535, 32896, 0, 65535],
+       [4864, -4864, 65535, 32896, 0, 65535],
+       [5120, -5120, 65535, 32896, 0, 65535],
+       [5376, -5376, 65535, 32896, 0, 65535],
+       [5632, -5632, 65535, 32896, 0, 65535],
+       [5888, -5888, 65535, 32896, 0, 65535],
+       [6144, -6144, 65535, 32896, 0, 65535],
+       [6400, -6400, 65535, 32896, 0, 65535],
+       [6656, -6656, 65535, 32896, 0, 65535],
+       [6912, -6912, 65535, 32896, 0, 65535],
+       [7168, -7168, 65535, 32896, 0, 65535],
+       [7424, -7424, 65535, 32896, 0, 65535],
+       [7680, -7680, 65535, 32896, 0, 65535],
+       [7936, -7936, 65535, 32896, 0, 65535],
+       [8192, -8192, 65535, 32896, 0, 65535],
+       [8448, -8448, 65535, 32896, 0, 65535],
+       [8704, -8704, 65535, 32896, 0, 65535],
+       [8960, -8960, 65535, 32896, 0, 65535],
+       [9216, -9216, 65535, 32896, 0, 65535],
+       [9472, -9472, 65535, 32896, 0, 65535],
+       [9728, -9728, 65535, 32896, 0, 65535],
+       [9984, -9984, 65535, 32896, 0, 65535]
+     ],
+     "input_note": "x, y, r, g, b, i as 16-bit LaserPoint fields (colors = octet x 257)"
+    },
+    "packets": [
+      {"ref": "rt-first-config-wave-xyrgbi-20", "send_at_s": 0.0},
+      {"ref": "rt-second-wave-xyrgbi-20", "send_at_s": 0.000666},
+      {"ref": "rt-connection-close-empty", "send_at_s": null}
+    ],
+    "expect": {"outcome": "match", "note": "send_at_s is the earliest legal send time relative to the stream origin"}
+   },
+   {
+    "id": "sender-xyrgbi-20-svc1",
+    "kind": "sender-sequence",
+    "summary": "First 20 points routed to explicit service 1",
+    "refs": ["Stream 2.2 p11"],
+    "interpretation": "normative",
+    "sender": {
+     "pps": 30000,
+     "packet_points": 20,
+     "channel": 0,
+     "service_id": 1,
+     "sdm": 0,
+     "group": 0,
+     "first_seq": 4660,
+     "ts_base": 0,
+     "budget": 1472,
+     "lead_in": false,
+     "input_points": [
+       [0, 0, 0, 0, 0, 0],
+       [256, -256, 65535, 32896, 0, 65535],
+       [512, -512, 65535, 32896, 0, 65535],
+       [768, -768, 65535, 32896, 0, 65535],
+       [1024, -1024, 65535, 32896, 0, 65535],
+       [1280, -1280, 65535, 32896, 0, 65535],
+       [1536, -1536, 65535, 32896, 0, 65535],
+       [1792, -1792, 65535, 32896, 0, 65535],
+       [2048, -2048, 65535, 32896, 0, 65535],
+       [2304, -2304, 65535, 32896, 0, 65535],
+       [2560, -2560, 65535, 32896, 0, 65535],
+       [2816, -2816, 65535, 32896, 0, 65535],
+       [3072, -3072, 65535, 32896, 0, 65535],
+       [3328, -3328, 65535, 32896, 0, 65535],
+       [3584, -3584, 65535, 32896, 0, 65535],
+       [3840, -3840, 65535, 32896, 0, 65535],
+       [4096, -4096, 65535, 32896, 0, 65535],
+       [4352, -4352, 65535, 32896, 0, 65535],
+       [4608, -4608, 65535, 32896, 0, 65535],
+       [4864, -4864, 65535, 32896, 0, 65535]
+     ],
+     "close": false
+    },
+    "packets": [
+      {"ref": "rt-first-config-wave-xyrgbi-20-svc1", "send_at_s": 0.0}
+    ],
+    "expect": {"outcome": "match"}
+   },
+   {
+    "id": "sender-config-cadence-1k-50",
+    "kind": "sender-sequence",
+    "summary": "Unchanged configuration repeated every 200 ms of stream time (packets 0 and 4), SDM=SCM=1, channel 5",
+    "refs": ["Stream 2.2 p10 (present every 200 ms or 250 ms)", "Stream 2.2 p10-11 (SDM)", "Stream 6.7 p43 (SCM)"],
+    "interpretation": "project",
+    "note": "200 ms is the selected cadence; the sender places configuration on the last packet that keeps the gap between configured packets <= 200 ms. Only header octets are literal here; sample octets are covered by sender-xyrgbi-40-at-30k.",
+    "sender": {
+     "pps": 1000,
+     "packet_points": 50,
+     "channel": 5,
+     "service_id": 0,
+     "sdm": 1,
+     "group": 0,
+     "first_seq": 16,
+     "ts_base": 0,
+     "budget": 1472,
+     "lead_in": false,
+     "input_blank_count": 300
+    },
+    "packets": [
+      {
+       "send_at_s": 0.0,
+       "datagram_length": 436,
+       "length": 36,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0010", "value": "0x0010", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "01b0", "value": "432 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c5", "value": "bit7=1 CCLF=1 channel=5", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000000", "value": "0 us (0x00000000)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "04", "value": "4 words (16 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "11", "value": "SDM=1 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 20, "field": "dict[2]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 22, "field": "dict[3]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 24, "field": "dict[4]", "hex": "527e", "value": "0x527E Red 638 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 26, "field": "dict[5]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 28, "field": "dict[6]", "hex": "51cc", "value": "0x51CC Blue 460 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 30, "field": "dict[7]", "hex": "5c10", "value": "0x5C10 Intensity", "ref": "Stream 3.4.9 p24"},
+         {"offset": 32, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 33, "field": "wave.duration", "hex": "00c350", "value": "50000 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.05,
+       "datagram_length": 416,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0011", "value": "0x0011", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "019c", "value": "412 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "85", "value": "bit7=1 CCLF=0 channel=5", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "0000c350", "value": "50000 us (0x0000C350)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00c350", "value": "50000 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.1,
+       "datagram_length": 416,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0012", "value": "0x0012", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "019c", "value": "412 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "85", "value": "bit7=1 CCLF=0 channel=5", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "000186a0", "value": "100000 us (0x000186A0)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00c350", "value": "50000 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.15,
+       "datagram_length": 416,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0013", "value": "0x0013", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "019c", "value": "412 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "85", "value": "bit7=1 CCLF=0 channel=5", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "000249f0", "value": "150000 us (0x000249F0)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00c350", "value": "50000 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.2,
+       "datagram_length": 436,
+       "length": 36,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0014", "value": "0x0014", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "01b0", "value": "432 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c5", "value": "bit7=1 CCLF=1 channel=5", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00030d40", "value": "200000 us (0x00030D40)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "04", "value": "4 words (16 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "11", "value": "SDM=1 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 20, "field": "dict[2]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 22, "field": "dict[3]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 24, "field": "dict[4]", "hex": "527e", "value": "0x527E Red 638 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 26, "field": "dict[5]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 28, "field": "dict[6]", "hex": "51cc", "value": "0x51CC Blue 460 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 30, "field": "dict[7]", "hex": "5c10", "value": "0x5C10 Intensity", "ref": "Stream 3.4.9 p24"},
+         {"offset": 32, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 33, "field": "wave.duration", "hex": "00c350", "value": "50000 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.25,
+       "datagram_length": 416,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0015", "value": "0x0015", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "019c", "value": "412 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "85", "value": "bit7=1 CCLF=0 channel=5", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "0003d090", "value": "250000 us (0x0003D090)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "10", "value": "SCM=1", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00c350", "value": "50000 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": null,
+       "datagram_length": 4,
+       "length": 4,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "44", "value": "0x44 RT graceful close", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0016", "value": "0x0016", "ref": "Hello 2.1 p7"}
+       ]
+      }
+    ],
+    "expect": {
+     "outcome": "match-prefix",
+     "config_packets": [0, 4]
+    }
+   },
+   {
+    "id": "sender-timestamp-wrap",
+    "kind": "sender-sequence",
+    "summary": "Wire timestamps wrap past 2^32 while cumulative durations stay exact (30 kpps, 3 x 20 points)",
+    "refs": ["Stream 2.1 p9", "Stream 6.1 p38"],
+    "interpretation": "normative",
+    "sender": {
+     "pps": 30000,
+     "packet_points": 20,
+     "channel": 0,
+     "service_id": 0,
+     "sdm": 0,
+     "group": 0,
+     "first_seq": 256,
+     "ts_base": 4294966528,
+     "budget": 1472,
+     "lead_in": false,
+     "input_blank_count": 60,
+     "close": false
+    },
+    "packets": [
+      {
+       "send_at_s": 0.0,
+       "datagram_length": 196,
+       "length": 36,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0100", "value": "0x0100", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "00c0", "value": "192 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "fffffd00", "value": "4294966528 us (0xFFFFFD00)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "04", "value": "4 words (16 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 20, "field": "dict[2]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 22, "field": "dict[3]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 24, "field": "dict[4]", "hex": "527e", "value": "0x527E Red 638 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 26, "field": "dict[5]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 28, "field": "dict[6]", "hex": "51cc", "value": "0x51CC Blue 460 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 30, "field": "dict[7]", "hex": "5c10", "value": "0x5C10 Intensity", "ref": "Stream 3.4.9 p24"},
+         {"offset": 32, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 33, "field": "wave.duration", "hex": "00029a", "value": "666 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.000666,
+       "datagram_length": 176,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0101", "value": "0x0101", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "00ac", "value": "172 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "ffffff9a", "value": "4294967194 us (0xFFFFFF9A)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00029b", "value": "667 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.001333,
+       "datagram_length": 176,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0102", "value": "0x0102", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "00ac", "value": "172 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000235", "value": "565 us (0x00000235)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00029b", "value": "667 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      }
+    ],
+    "expect": {"outcome": "match-prefix"}
+   },
+   {
+    "id": "sender-tail-65-at-64",
+    "kind": "sender-sequence",
+    "summary": "65 finite points with a nominal 64 per packet become 45 + 20 (never 64 + 1)",
+    "refs": ["Stream 6.1 p38 (at least 20 samples)"],
+    "interpretation": "project",
+    "sender": {
+     "pps": 30000,
+     "packet_points": 64,
+     "channel": 0,
+     "service_id": 0,
+     "sdm": 0,
+     "group": 0,
+     "first_seq": 1,
+     "ts_base": 0,
+     "budget": 1472,
+     "lead_in": false,
+     "input_blank_count": 65,
+     "close": false
+    },
+    "packets": [
+      {
+       "send_at_s": 0.0,
+       "datagram_length": 396,
+       "length": 36,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0001", "value": "0x0001", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "0188", "value": "392 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "c0", "value": "bit7=1 CCLF=1 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "00000000", "value": "0 us (0x00000000)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "cfg.scwc", "hex": "04", "value": "4 words (16 octets)", "ref": "Stream 2.2 p10"},
+         {"offset": 13, "field": "cfg.cfl", "hex": "01", "value": "SDM=0 Close=0 Routing=1", "ref": "Stream 2.2 p10-11"},
+         {"offset": 14, "field": "cfg.service_id", "hex": "00", "value": "0 = default service for the mode", "ref": "Stream 2.2 p11"},
+         {"offset": 15, "field": "cfg.service_mode", "hex": "01", "value": "0x01 laser projector graphic (continuous)", "ref": "Stream 2.2 p11-12"},
+         {"offset": 16, "field": "dict[0]", "hex": "4200", "value": "0x4200 X", "ref": "Stream 3.4.7 p22"},
+         {"offset": 18, "field": "dict[1]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 20, "field": "dict[2]", "hex": "4210", "value": "0x4210 Y", "ref": "Stream 3.4.7 p22-23"},
+         {"offset": 22, "field": "dict[3]", "hex": "4010", "value": "0x4010 Precision (+1 octet)", "ref": "Stream 3.4.5 p20-21"},
+         {"offset": 24, "field": "dict[4]", "hex": "527e", "value": "0x527E Red 638 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 26, "field": "dict[5]", "hex": "5214", "value": "0x5214 Green 532 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 28, "field": "dict[6]", "hex": "51cc", "value": "0x51CC Blue 460 nm", "ref": "Stream 3.4.8/3.4.10 p23-25"},
+         {"offset": 30, "field": "dict[7]", "hex": "5c10", "value": "0x5C10 Intensity", "ref": "Stream 3.4.9 p24"},
+         {"offset": 32, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 33, "field": "wave.duration", "hex": "0005dc", "value": "1500 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      },
+      {
+       "send_at_s": 0.0015,
+       "datagram_length": 176,
+       "length": 16,
+       "segments": [
+         {"offset": 0, "field": "hello.command", "hex": "40", "value": "0x40 RT channel message", "ref": "Hello 2.1 p5-6"},
+         {"offset": 1, "field": "hello.flags", "hex": "00", "value": "client group 0", "ref": "Hello 2.1 p6-7"},
+         {"offset": 2, "field": "hello.sequence", "hex": "0002", "value": "0x0002", "ref": "Hello 2.1 p7"},
+         {"offset": 4, "field": "msg.total_size", "hex": "00ac", "value": "172 octets", "ref": "Stream 2.1 p7-8"},
+         {"offset": 6, "field": "msg.cnl", "hex": "80", "value": "bit7=1 CCLF=0 channel=0", "ref": "Stream 2.1 p8"},
+         {"offset": 7, "field": "msg.chunk_type", "hex": "01", "value": "0x01 laser projector wave samples", "ref": "Stream 2.1 p8-9"},
+         {"offset": 8, "field": "msg.timestamp", "hex": "000005dc", "value": "1500 us (0x000005DC)", "ref": "Stream 2.1 p9"},
+         {"offset": 12, "field": "wave.flags", "hex": "00", "value": "SCM=0", "ref": "Stream 6.1 p38, 6.7 p43"},
+         {"offset": 13, "field": "wave.duration", "hex": "00029a", "value": "666 us", "ref": "Stream 6.1 p38-39"}
+       ]
+      }
+    ],
+    "expect": {
+     "outcome": "match-prefix",
+     "batches": [45, 20]
+    }
+   }
+ ]
+}

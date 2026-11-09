@@ -1234,6 +1234,7 @@ static esp_err_t stop_everything_safe(void)
     esp_err_t ilda_ret = ilda_player_stop_and_wait(1500);
     rp_manager_stop_test_stream();
     ilw_protocol_stop();
+    esp_err_t idn_ret = idn_protocol_cancel_output(2000);
 
     esp_err_t stop_ret = rp_manager_output_force_stop();
     esp_err_t clear_ret = rp_manager_clear_buffer();
@@ -1244,6 +1245,10 @@ static esp_err_t stop_everything_safe(void)
 
     if (clear_ret != ESP_OK) {
         return clear_ret;
+    }
+
+    if (idn_ret != ESP_OK) {
+        return idn_ret;
     }
 
     return ilda_ret;
